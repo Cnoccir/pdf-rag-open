@@ -5,17 +5,15 @@ This class serves as the main entry point for the chat functionality.
 
 import logging
 import asyncio
-from typing import Dict, List, Any, Optional, Union, Callable, AsyncGenerator
+from typing import Dict, List, Any, Optional, Union, AsyncGenerator
 from datetime import datetime
+import uuid
 
-from langchain.chat_models import ChatOpenAI
-from langchain.schema.messages import AIMessage, HumanMessage, SystemMessage
-
-from app.chat.types import ChatArgs, ContentType, ResearchMode
-from app.chat.langgraph.state import GraphState, QueryState, DocumentState, MessageType, ConversationState
+from app.chat.types import ChatArgs, ContentType, ResearchMode, ResearchContext
+from app.chat.langgraph.state import GraphState, QueryState, MessageType, ConversationState
 from app.chat.langgraph.graph import create_query_graph, create_document_graph, create_research_graph
 from app.chat.memories.memory_manager import MemoryManager
-from app.chat.models.conversation import ConversationState as NewConversationState, Message, Citation
+from app.chat.utils.langgraph_helpers import format_conversation_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -105,8 +103,7 @@ class ChatManager:
                 logger.info(f"Created new conversation state for {self.conversation_id}")
         else:
             # Generate new conversation ID if not provided
-            from uuid import uuid4
-            self.conversation_id = str(uuid4())
+            self.conversation_id = str(uuid.uuid4())
             
             # Create new conversation state
             metadata = {
@@ -144,7 +141,7 @@ class ChatManager:
         
         # Create initial state for document processing
         state = GraphState(
-            document_state=DocumentState(pdf_id=pdf_id)
+            document_state={"pdf_id": pdf_id}
         )
         
         # Execute the document processing graph
@@ -154,10 +151,8 @@ class ChatManager:
             return {
                 "status": "success",
                 "pdf_id": pdf_id,
-                "elements": len(result.document_state.elements) if result.document_state else 0,
-                "processing_time": (
-                    result.document_state.end_time - result.document_state.start_time
-                ).total_seconds() if result.document_state and result.document_state.end_time else None
+                "elements": result.document_state.get("element_count", 0) if result.document_state else 0,
+                "processing_time": result.document_state.get("processing_time", 0) if result.document_state else 0
             }
         except Exception as e:
             logger.error(f"Document processing failed: {str(e)}", exc_info=True)
@@ -166,6 +161,40 @@ class ChatManager:
                 "pdf_id": pdf_id,
                 "error": str(e)
             }
+    
+    async def query(self, query: str, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Process a query using the appropriate LangGraph.
+        
+        Args:
+            query: User query
+            pdf_ids: Optional list of PDF IDs to search
+            
+        Returns:
+            Query results
+        """
+        if self.stream_enabled:
+            # Collect all chunks for a complete response
+            chunks = []
+            final_response = None
+            
+            async for chunk in self.stream_query(query, pdf_ids):
+                if "status" in chunk and chunk["status"] == "complete":
+                    final_response = chunk
+                elif "chunk" in chunk:
+                    chunks.append(chunk["chunk"])
+            
+            if final_response:
+                return final_response
+            else:
+                # Build response from chunks
+                return {
+                    "response": "".join(chunks),
+                    "conversation_id": self.conversation_id
+                }
+        else:
+            # Process as non-streaming query
+            return await self.aquery(query, pdf_ids)
     
     async def aquery(self, query: str, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """
@@ -198,7 +227,7 @@ class ChatManager:
         )
         
         # Choose the appropriate graph based on research mode
-        graph = self.research_graph if self.research_mode == ResearchMode.RESEARCH else self.query_graph
+        graph = self.research_graph if self.research_mode in [ResearchMode.RESEARCH, ResearchMode.MULTI] else self.query_graph
         
         # Execute the graph
         try:
@@ -236,8 +265,7 @@ class ChatManager:
     
     async def stream_query(self, query: str, pdf_ids: Optional[List[str]] = None) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Stream a query response using the query graph.
-        This is a placeholder for actual streaming implementation.
+        Stream a query response.
         
         Args:
             query: User query
@@ -247,7 +275,6 @@ class ChatManager:
             Streaming query results
         """
         # Simplified streaming implementation
-        # In a complete implementation, this would stream tokens from the LLM
         try:
             # Get full response first
             full_response = await self.aquery(query, pdf_ids)
@@ -267,7 +294,7 @@ class ChatManager:
                 return
                 
             # Split into chunks (in a real implementation, this would be token-by-token)
-            chunk_size = 20  # Characters per chunk
+            chunk_size = self.chat_args.stream_chunk_size or 20  # Characters per chunk
             chunks = [response_text[i:i+chunk_size] for i in range(0, len(response_text), chunk_size)]
             
             # Yield each chunk
@@ -299,40 +326,6 @@ class ChatManager:
                 "conversation_id": self.conversation_id
             }
     
-    async def query(self, query: str, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-        """
-        Process a query either as stream or full response.
-        
-        Args:
-            query: User query
-            pdf_ids: Optional list of PDF IDs to search
-            
-        Returns:
-            Query results
-        """
-        if self.stream_enabled:
-            # Collect all chunks for a complete response
-            chunks = []
-            final_response = None
-            
-            async for chunk in self.stream_query(query, pdf_ids):
-                if "status" in chunk and chunk["status"] == "complete":
-                    final_response = chunk
-                elif "chunk" in chunk:
-                    chunks.append(chunk["chunk"])
-            
-            if final_response:
-                return final_response
-            else:
-                # Build response from chunks
-                return {
-                    "response": "".join(chunks),
-                    "conversation_id": self.conversation_id
-                }
-        else:
-            # Process as non-streaming query
-            return await self.aquery(query, pdf_ids)
-    
     def get_conversation_history(self) -> List[Dict[str, Any]]:
         """
         Get formatted conversation history.
@@ -353,7 +346,7 @@ class ChatManager:
                 "role": "user" if msg.type == "user" else "assistant",
                 "content": msg.content,
                 "timestamp": msg.created_at.isoformat(),
-                "message_id": msg.id
+                "message_id": msg.id if hasattr(msg, "id") else None
             })
             
         return history
@@ -369,7 +362,7 @@ class ChatManager:
             return False
             
         # Delete from memory manager
-        result = self.memory_manager.delete_conversation(self.conversation_id)
+        self.memory_manager.delete_conversation(self.conversation_id)
         
         # Reset conversation state
         metadata = {
@@ -377,8 +370,8 @@ class ChatManager:
             "research_mode": self.research_mode == ResearchMode.RESEARCH
         }
         
-        self.conversation_state = NewConversationState(
-            id=self.conversation_id,
+        self.conversation_state = ConversationState(
+            conversation_id=self.conversation_id,
             title=f"Conversation about {self.pdf_id}",
             pdf_id=self.pdf_id,
             metadata=metadata
@@ -386,7 +379,7 @@ class ChatManager:
         
         # Add system message
         system_prompt = self.BASE_SYSTEM_PROMPT if self.research_mode == ResearchMode.SINGLE else f"{self.BASE_SYSTEM_PROMPT}\n\n{self.RESEARCH_MODE_PROMPT}"
-        self.conversation_state.add_message("system", system_prompt)
+        self.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
         
         logger.info(f"Cleared conversation {self.conversation_id}")
-        return result
+        return True

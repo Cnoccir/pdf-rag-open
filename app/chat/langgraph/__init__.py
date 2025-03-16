@@ -6,9 +6,10 @@ for advanced document processing and querying.
 
 from app.chat.langgraph.state import (
     GraphState,
-    DocumentState,
     QueryState,
-    RetrievalState
+    RetrievalState,
+    GenerationState,
+    ResearchState
 )
 from app.chat.langgraph.nodes import (
     document_processor,
@@ -26,9 +27,10 @@ from app.chat.langgraph.graph import (
 __all__ = [
     # States
     "GraphState",
-    "DocumentState",
     "QueryState",
     "RetrievalState",
+    "GenerationState",
+    "ResearchState",
     
     # Nodes
     "document_processor",

@@ -1,6 +1,6 @@
-# app/chat/vector_stores/__init__.py
 """
-Vector store module with unified implementation for Neo4j integration.
+Vector store module with unified Neo4j implementation.
+This module provides a single point of access to Neo4j vector storage.
 """
 
 import os
@@ -15,11 +15,11 @@ _vector_store_instance = None
 
 def get_vector_store() -> Neo4jVectorStore:
     """
-    Get unified vector store instance.
-    Returns Neo4j vector store by default.
+    Get unified Neo4j vector store instance.
+    Uses environment variables for configuration.
     
     Returns:
-        Vector store instance
+        Neo4jVectorStore instance
     """
     global _vector_store_instance
     
@@ -29,11 +29,14 @@ def get_vector_store() -> Neo4jVectorStore:
             neo4j_url = os.getenv("NEO4J_URL", "bolt://localhost:7687")
             neo4j_user = os.getenv("NEO4J_USER", "neo4j")
             neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
+            embedding_dimension = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
             
             _vector_store_instance = Neo4jVectorStore(
                 url=neo4j_url,
                 username=neo4j_user,
-                password=neo4j_password
+                password=neo4j_password,
+                embedding_dimension=embedding_dimension,
+                embedding_model="text-embedding-3-small"
             )
             
             logger.info("Neo4j vector store initialized successfully")
@@ -43,4 +46,7 @@ def get_vector_store() -> Neo4jVectorStore:
     
     return _vector_store_instance
 
-__all__ = ["Neo4jVectorStore", "get_vector_store"]
+# Make TechDocVectorStore an alias for Neo4jVectorStore for backward compatibility
+TechDocVectorStore = Neo4jVectorStore
+
+__all__ = ["Neo4jVectorStore", "TechDocVectorStore", "get_vector_store"]

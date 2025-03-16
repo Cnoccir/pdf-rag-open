@@ -35,7 +35,7 @@ class DocumentProcessor:
         Returns:
             Processing results including extracted content and metadata
         """
-        from app.chat.vector_stores.vector_store import TechDocVectorStore
+        from app.chat.vector_stores import Neo4jVectorStore, get_vector_store
         
         try:
             logger.info(f"Processing document {pdf_id} with LangGraph processor")
@@ -57,7 +57,7 @@ class DocumentProcessor:
             result["elements"] = processed_elements
             
             # 3. Store content in vector database
-            vector_store = TechDocVectorStore()
+            vector_store = get_vector_store()
             if not vector_store.initialized:
                 raise DocumentProcessingError(f"Vector store initialization failed for {pdf_id}")
             

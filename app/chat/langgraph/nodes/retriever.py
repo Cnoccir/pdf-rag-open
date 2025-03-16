@@ -9,7 +9,7 @@ from typing import Dict, Any, List
 from datetime import datetime
 
 from app.chat.langgraph.state import QueryState, RetrievalState, GraphState, RetrievalStrategy
-from app.chat.vector_stores import TechDocVectorStore, get_vector_store
+from app.chat.vector_stores import Neo4jVectorStore, get_vector_store
 from app.chat.types import ContentElement, SearchQuery
 
 logger = logging.getLogger(__name__)

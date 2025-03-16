@@ -31,12 +31,9 @@ from app.chat.types import (
     ResearchManager,
     ResearchContext,
     DocumentSummary,
-    CrossDocumentReference,
-    ResearchResult,
 
     # Search Models
     SearchQuery,
-    SearchResult,
 
     # Processing Models
     ProcessingResult,
@@ -112,12 +109,9 @@ __all__ = [
     "ResearchManager",
     "ResearchContext",
     "DocumentSummary",
-    "CrossDocumentReference",
-    "ResearchResult",
 
     # Search Models
     "SearchQuery",
-    "SearchResult",
 
     # Processing Models
     "ProcessingResult",

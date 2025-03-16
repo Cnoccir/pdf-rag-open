@@ -1,5 +1,5 @@
 """
-Enhanced utilities for LangGraph-based PDF RAG system.
+Utilities for the LangGraph-based PDF RAG system.
 Modularized for better organization and maintainability.
 """
 
@@ -34,12 +34,6 @@ from .document import (
     generate_file_hash
 )
 
-# Serialization utilities
-from .serialization import (
-    save_json,
-    load_json
-)
-
 # LangGraph-specific helpers
 from .langgraph_helpers import (
     extract_technical_terms_simple,
@@ -49,8 +43,30 @@ from .langgraph_helpers import (
     create_empty_graph_state
 )
 
-# Logging utilities
-from .logging import (
-    setup_logging,
-    get_processor_metrics
-)
+# Setup logging
+def setup_logging(pdf_id: str, output_dir: str = "output") -> None:
+    """
+    Set up logging for document processing.
+    
+    Args:
+        pdf_id: Document identifier
+        output_dir: Output directory
+    """
+    import logging
+    import os
+    from pathlib import Path
+    
+    log_dir = Path(output_dir) / pdf_id / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    log_path = log_dir / "processing.log"
+    
+    # Configure logger
+    logger = logging.getLogger()
+    handler = logging.FileHandler(log_path)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    
+    # Add handler if it doesn't exist
+    if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(log_path) for h in logger.handlers):
+        logger.addHandler(handler)

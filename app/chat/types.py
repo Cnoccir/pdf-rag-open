@@ -1,15 +1,14 @@
 """
 Core type definitions for the PDF RAG system.
-Focused on LangGraph architecture without legacy compatibility layers.
+Focused on LangGraph architecture and Neo4j integration.
 """
 
 from enum import Enum
-from typing import List, Dict, Any, Optional, Set, Union, Tuple
+from typing import List, Dict, Any, Optional, Set, Union
 from datetime import datetime
-from pydantic import BaseModel, Field, model_validator, constr
+from pydantic import BaseModel, Field, validator, constr
 import uuid
 import logging
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +28,8 @@ class ContentType(str, Enum):
 class ResearchMode(str, Enum):
     """Research mode for document analysis."""
     SINGLE = "single"  # Single document analysis
-    MULTI = "multi"    # Multi-document analysis
-
-class MessageRole(str, Enum):
-    """Message role in a chat conversation."""
-    SYSTEM = "system"
-    USER = "user"
-    ASSISTANT = "assistant"
-    FUNCTION = "function"
-    TOOL = "tool"
+    MULTI = "multi"    # Multi-document analysis 
+    RESEARCH = "research"  # Alias for MULTI for backward compatibility
 
 class RelationType(str, Enum):
     """Types of relationships between concepts."""
@@ -60,131 +52,35 @@ class RelationType(str, Enum):
             return cls.RELATES_TO
 
 # ------------------------------------------------------------------------
-# Chat Models
-# ------------------------------------------------------------------------
-class TokenUsage(BaseModel):
-    """Model for tracking token usage."""
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    
-    def __add__(self, other: 'TokenUsage') -> 'TokenUsage':
-        """Add token usage counts from another TokenUsage instance."""
-        return TokenUsage(
-            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
-            completion_tokens=self.completion_tokens + other.completion_tokens,
-            total_tokens=self.total_tokens + other.total_tokens
-        )
-    
-    def update(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
-        """Update token counts."""
-        self.prompt_tokens += prompt_tokens
-        self.completion_tokens += completion_tokens
-        self.total_tokens = self.prompt_tokens + self.completion_tokens
-
-class ChatMessage(BaseModel):
-    """Model for chat message with role, content, and metadata."""
-    role: MessageRole
-    content: str
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    citations: List[Dict[str, Any]] = Field(default_factory=list)
-    
-    @classmethod
-    def system(cls, content: str) -> 'ChatMessage':
-        """Create a system message."""
-        return cls(role=MessageRole.SYSTEM, content=content)
-    
-    @classmethod
-    def user(cls, content: str) -> 'ChatMessage':
-        """Create a user message."""
-        return cls(role=MessageRole.USER, content=content)
-    
-    @classmethod
-    def assistant(cls, content: str) -> 'ChatMessage':
-        """Create an assistant message."""
-        return cls(role=MessageRole.ASSISTANT, content=content)
-    
-    @classmethod
-    def function(cls, content: str) -> 'ChatMessage':
-        """Create a function message."""
-        return cls(role=MessageRole.FUNCTION, content=content)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        return {
-            "role": self.role,
-            "content": self.content,
-            "id": self.id,
-            "timestamp": self.timestamp.isoformat(),
-            "metadata": self.metadata,
-            "citations": self.citations
-        }
-
-class ChatState(BaseModel):
-    """Model for chat state with history, context, and settings."""
-    chat_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    pdf_id: Optional[str] = None
-    pdf_ids: List[str] = Field(default_factory=list)
-    messages: List[ChatMessage] = Field(default_factory=list)
-    context: List[Dict[str, Any]] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    active_pdf_id: Optional[str] = None
-    research_mode: bool = False
-    last_activity: datetime = Field(default_factory=datetime.utcnow)
-    token_usage: TokenUsage = Field(default_factory=TokenUsage)
-    stream_id: Optional[str] = None
-    
-    def add_message(self, message: ChatMessage) -> None:
-        """Add a message to the chat history."""
-        self.messages.append(message)
-        self.last_activity = datetime.utcnow()
-    
-    def add_context(self, context_item: Dict[str, Any]) -> None:
-        """Add context item for the current conversation."""
-        self.context.append(context_item)
-    
-    def set_active_pdf(self, pdf_id: str) -> None:
-        """Set the active PDF for the conversation."""
-        self.active_pdf_id = pdf_id
-        if pdf_id not in self.pdf_ids:
-            self.pdf_ids.append(pdf_id)
-    
-    def toggle_research_mode(self, enable: bool = True) -> None:
-        """Toggle research mode on/off."""
-        self.research_mode = enable
-
-class ChatArgs:
-    """Arguments for a chat interaction"""
-    def __init__(
-        self,
-        conversation_id: Optional[str] = None,
-        pdf_id: Optional[str] = None,
-        research_mode: ResearchMode = ResearchMode.SINGLE,
-        stream_enabled: bool = False,
-        stream_chunk_size: int = 10
-    ):
-        self.conversation_id = conversation_id
-        self.pdf_id = pdf_id
-        self.research_mode = research_mode
-        self.stream_enabled = stream_enabled
-        self.stream_chunk_size = stream_chunk_size
-
-# ------------------------------------------------------------------------
 # Document Content Models
 # ------------------------------------------------------------------------
 class ContentMetadata(BaseModel):
     """Metadata for a content element."""
-    page: int = 0
-    source: str = ""
-    relevance_score: float = 0.0
+    pdf_id: str = ""
+    page_number: int = 0
+    section: str = ""
+    content_type: str = "text"
+    section_headers: List[str] = Field(default_factory=list)
+    hierarchy_level: int = 0
+    technical_terms: List[str] = Field(default_factory=list)
+    surrounding_context: Optional[str] = None
+    parent_element: Optional[str] = None
+    docling_ref: Optional[str] = None
+    confidence: float = 1.0
+    image_path: Optional[str] = None
+    image_metadata: Optional[Any] = None
+    table_data: Optional[Any] = None
 
 class ContentElement(BaseModel):
     """A content element from a document."""
-    type: ContentType = ContentType.TEXT
+    element_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     content: str
+    content_type: ContentType = ContentType.TEXT
+    pdf_id: str
     metadata: ContentMetadata = Field(default_factory=ContentMetadata)
+
+    class Config:
+        arbitrary_types_allowed = True
 
 class TableData(BaseModel):
     """Model for structured table data extracted from documents."""
@@ -197,80 +93,81 @@ class TableData(BaseModel):
     column_count: int = 0
     technical_concepts: List[str] = Field(default_factory=list)
 
-class DocumentSummary(BaseModel):
-    """Model for document summary with key insights and concepts."""
-    title: str
-    author: Optional[str] = None
-    document_type: Optional[str] = None
-    primary_concepts: List[str] = Field(default_factory=list)
-    key_insights: List[str] = Field(default_factory=list)
-    sections: List[Dict[str, Any]] = Field(default_factory=list)
-    technical_terms: List[str] = Field(default_factory=list)
-    summary: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
 # ------------------------------------------------------------------------
-# Processing Models
+# Image Models
 # ------------------------------------------------------------------------
-class ProcessingConfig(BaseModel):
-    """Configuration for document processing."""
-    pdf_id: constr(min_length=1)
-    chunk_size: int = Field(default=400, gt=0)
-    chunk_overlap: int = Field(default=50, ge=0)
-    embedding_model: str = Field(default="text-embedding-3-small")
-    process_images: bool = True
-    process_tables: bool = True
-    search_limit: Optional[int] = 5
+class ImagePaths(BaseModel):
+    """Model for image file paths."""
+    original: str
+    format: str = "PNG"
+    size: int = 0
+    processed: Optional[str] = None
+    thumbnail: Optional[str] = None
 
-class ProcessingResult(BaseModel):
-    """Result of document processing."""
-    pdf_id: str
-    elements: List[ContentElement] = Field(default_factory=list)
-    raw_data: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
+class ImageFeatures(BaseModel):
+    """Model for image features extracted from analysis."""
+    dimensions: tuple = (0, 0)
+    aspect_ratio: float = 1.0
+    color_mode: str = "RGB"
+    is_grayscale: bool = False
+    embedding: List[float] = Field(default_factory=list)
+    tags: List[str] = Field(default_factory=list)
 
-# ------------------------------------------------------------------------
-# Search Models
-# ------------------------------------------------------------------------
-class SearchQuery(BaseModel):
-    """Query for searching documents."""
-    query: str
-    pdf_id: Optional[str] = None
-    limit: int = Field(default=5, gt=0)
+class ImageAnalysis(BaseModel):
+    """Model for image analysis results."""
+    description: str = ""
+    detected_objects: List[str] = Field(default_factory=list)
+    technical_details: Dict[str, Any] = Field(default_factory=dict)
+    technical_concepts: List[str] = Field(default_factory=list)
 
-class SearchResult(BaseModel):
-    """Result of a document search."""
-    query: SearchQuery
-    elements: List[ContentElement] = Field(default_factory=list)
-    raw_data: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
+class ImageMetadata(BaseModel):
+    """Model for image metadata."""
+    image_id: str
+    paths: ImagePaths
+    features: ImageFeatures
+    analysis: ImageAnalysis
+    page_number: int = 0
 
 # ------------------------------------------------------------------------
 # Concept Network Models
 # ------------------------------------------------------------------------
 class Concept(BaseModel):
     """Model for a concept in the concept network."""
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
+    occurrences: int = 0
+    in_headers: bool = False
+    sections: List[str] = Field(default_factory=list)
+    first_occurrence_page: Optional[int] = None
+    importance_score: float = 0.5
+    is_primary: bool = False
+    category: Optional[str] = None
     description: Optional[str] = None
-    source_document: Optional[str] = None
-    source_page: Optional[int] = None
-    importance: float = 0.5
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class DocumentSummary(BaseModel):
+    """Summary of a document with key information."""
+    title: str = "Untitled Document"
+    description: str = ""
+    main_topics: List[str] = Field(default_factory=list)
+    key_takeaways: List[str] = Field(default_factory=list)
+    summary_text: str = ""
+    category: Optional[str] = None
+    estimated_reading_time: Optional[int] = None
 
 class ConceptRelationship(BaseModel):
     """Model for a relationship between concepts."""
-    source_id: str
-    target_id: str
+    source: str
+    target: str
     type: RelationType = RelationType.RELATES_TO
-    strength: float = 0.5
-    description: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    weight: float = 0.5
+    context: str = ""
+    extraction_method: str = "document-based"
 
 class ConceptNetwork(BaseModel):
     """Model for a network of concepts and their relationships."""
     concepts: List[Concept] = Field(default_factory=list)
     relationships: List[ConceptRelationship] = Field(default_factory=list)
+    primary_concepts: List[str] = Field(default_factory=list)
+    section_concepts: Dict[str, List[str]] = Field(default_factory=dict)
     
     def add_concept(self, concept: Concept) -> None:
         """Add a concept to the network."""
@@ -279,99 +176,196 @@ class ConceptNetwork(BaseModel):
     def add_relationship(self, relationship: ConceptRelationship) -> None:
         """Add a relationship to the network."""
         self.relationships.append(relationship)
+        
+    def calculate_importance_scores(self) -> None:
+        """Calculate importance scores and identify primary concepts."""
+        # Implement network centrality calculation here
+        # For now, use a simple approach based on relationship count
+        concept_connections = {}
+        
+        # Count connections for each concept
+        for rel in self.relationships:
+            concept_connections[rel.source] = concept_connections.get(rel.source, 0) + 1
+            concept_connections[rel.target] = concept_connections.get(rel.target, 0) + 1
+        
+        # Update importance scores
+        for concept in self.concepts:
+            # Base score from occurrences
+            base_score = min(0.7, (concept.occurrences or 0) * 0.1)
+            # Connection score
+            conn_score = min(0.3, (concept_connections.get(concept.name, 0) * 0.05))
+            # Header score
+            header_score = 0.2 if concept.in_headers else 0
+            
+            # Combined score
+            concept.importance_score = base_score + conn_score + header_score
+            concept.is_primary = concept.importance_score > 0.7
+        
+        # Sort concepts by importance score and update primary_concepts list
+        sorted_concepts = sorted(
+            self.concepts, 
+            key=lambda c: c.importance_score, 
+            reverse=True
+        )
+        
+        # Take top N concepts as primary
+        self.primary_concepts = [c.name for c in sorted_concepts[:10] if c.importance_score > 0.6]
+    
+    def add_section_concepts(self, section: str, concepts: List[str]) -> None:
+        """Add concepts to a section."""
+        if section not in self.section_concepts:
+            self.section_concepts[section] = []
+        
+        for concept in concepts:
+            if concept not in self.section_concepts[section]:
+                self.section_concepts[section].append(concept)
+    
+    def build_section_concept_map(self) -> None:
+        """Build section to concept mapping."""
+        # This is a placeholder for more sophisticated section mapping
+        # For now, we're using the simpler add_section_concepts method
+        pass
 
 # ------------------------------------------------------------------------
-# Image Models
+# Processing Models
 # ------------------------------------------------------------------------
-class ImagePaths(BaseModel):
-    """Model for image file paths."""
-    original: str
-    processed: Optional[str] = None
-    thumbnail: Optional[str] = None
+class ProcessingConfig(BaseModel):
+    """Configuration for document processing."""
+    pdf_id: constr(min_length=1)
+    chunk_size: int = Field(default=500, gt=0)
+    chunk_overlap: int = Field(default=100, ge=0)
+    embedding_model: str = Field(default="text-embedding-3-small")
+    embedding_dimensions: int = Field(default=1536)
+    process_images: bool = True
+    process_tables: bool = True
+    extract_technical_terms: bool = True
+    extract_relationships: bool = True
+    merge_list_items: bool = True
+    max_concepts_per_document: int = 200
+    search_limit: int = 5
 
-class ImageMetadata(BaseModel):
-    """Model for image metadata."""
-    width: int
-    height: int
-    format: str
-    page: int
-    position: Dict[str, float] = Field(default_factory=dict)
-
-class ImageFeatures(BaseModel):
-    """Model for image features extracted from analysis."""
-    embedding: List[float] = Field(default_factory=list)
-    tags: List[str] = Field(default_factory=list)
-    objects: List[Dict[str, Any]] = Field(default_factory=list)
-    text_blocks: List[Dict[str, Any]] = Field(default_factory=list)
-
-class ImageAnalysis(BaseModel):
-    """Model for image analysis results."""
-    image_id: str
-    caption: Optional[str] = None
-    alt_text: Optional[str] = None
-    tags: List[str] = Field(default_factory=list)
-    objects: List[Dict[str, Any]] = Field(default_factory=list)
-    features: Optional[ImageFeatures] = None
-    metadata: ImageMetadata
-    paths: ImagePaths
-    error: Optional[str] = None
-
-# ------------------------------------------------------------------------
-# Research Models
-# ------------------------------------------------------------------------
-class DocumentReference(BaseModel):
-    """Reference to a document in the research corpus."""
+class ProcessingResult(BaseModel):
+    """Result of document processing."""
     pdf_id: str
-    title: Optional[str] = None
-    author: Optional[str] = None
-    document_type: Optional[str] = None
-    primary_concepts: Optional[List[str]] = None
-    summary: Optional[str] = None
-    source: Optional[str] = None
-    active: bool = True
-
-class CrossDocumentReference(BaseModel):
-    """Evidence connecting concepts across documents."""
-    concept: str
-    documents: List[str]
-    strength: float = Field(default=0.5, ge=0.0, le=1.0)
-    context: Optional[str] = None
-
-class ResearchContext(BaseModel):
-    """Research context for multi-document analysis."""
-    documents: List[DocumentReference] = Field(default_factory=list)
-    active_documents: List[str] = Field(default_factory=list)
-    cross_document_evidence: List[CrossDocumentReference] = Field(default_factory=list)
-    concept_network: Optional[ConceptNetwork] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    
-    def add_document(self, document: DocumentReference) -> None:
-        """Add a document to the research context."""
-        self.documents.append(document)
-        
-    def set_active_documents(self, pdf_ids: List[str]) -> None:
-        """Set active documents for research."""
-        self.active_documents = pdf_ids
-        
-    def add_cross_document_evidence(self, evidence: CrossDocumentReference) -> None:
-        """Add cross-document evidence."""
-        self.cross_document_evidence.append(evidence)
-
-class ResearchResult(BaseModel):
-    """Results from a research operation across multiple documents."""
-    query: str
-    documents: List[DocumentReference] = Field(default_factory=list)
-    concepts: List[Concept] = Field(default_factory=list)
-    cross_references: List[CrossDocumentReference] = Field(default_factory=list)
-    summary: Optional[str] = None
     elements: List[ContentElement] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    error: Optional[str] = None
-
-class ResearchManager:
-    """
-    Forward reference for the ResearchManager class to avoid circular imports.
+    chunks: List[Dict[str, Any]] = Field(default_factory=list)
+    markdown_content: str = ""
+    markdown_path: str = ""
+    processing_metrics: Dict[str, Any] = Field(default_factory=dict)
+    concept_network: ConceptNetwork = Field(default_factory=ConceptNetwork)
+    visual_elements: List[ContentElement] = Field(default_factory=list)
+    document_summary: DocumentSummary = Field(default_factory=DocumentSummary)
+    raw_data: Dict[str, Any] = Field(default_factory=dict)
     
-    The actual implementation is in app.chat.research.research_manager.
-    """
-    pass
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get statistics about the processing result."""
+        stats = {
+            "element_count": len(self.elements),
+            "chunk_count": len(self.chunks),
+            "concept_count": len(self.concept_network.concepts),
+            "relationship_count": len(self.concept_network.relationships),
+            "element_types": {},
+            "top_technical_terms": {},
+        }
+        
+        # Count element types
+        for element in self.elements:
+            element_type = element.content_type.value if hasattr(element.content_type, 'value') else str(element.content_type)
+            stats["element_types"][element_type] = stats["element_types"].get(element_type, 0) + 1
+        
+        # Extract top technical terms
+        term_counts = {}
+        for element in self.elements:
+            if hasattr(element, 'metadata') and hasattr(element.metadata, 'technical_terms'):
+                for term in element.metadata.technical_terms:
+                    term_counts[term] = term_counts.get(term, 0) + 1
+        
+        # Sort by count
+        stats["top_technical_terms"] = {
+            term: count for term, count in 
+            sorted(term_counts.items(), key=lambda x: x[1], reverse=True)[:30]
+        }
+        
+        return stats
+
+# ------------------------------------------------------------------------
+# Search Models
+# ------------------------------------------------------------------------
+class SearchQuery(BaseModel):
+    """Query for searching documents."""
+    query: str
+    pdf_ids: List[str] = Field(default_factory=list)
+    active_pdf_ids: Optional[List[str]] = None
+    content_types: List[str] = Field(default_factory=list)
+    technical_terms: List[str] = Field(default_factory=list)
+    strategy: str = "hybrid"
+    max_results: int = 10
+    research_mode: bool = False
+    favor_visual: bool = False
+    favor_tables: bool = False
+    favor_code: bool = False
+    metadata_filters: Dict[str, Any] = Field(default_factory=dict)
+    concepts: List[str] = Field(default_factory=list)
+    keywords: List[str] = Field(default_factory=list)
+
+# ------------------------------------------------------------------------
+# Research Context
+# ------------------------------------------------------------------------
+class ResearchContext(BaseModel):
+    """Research context for the conversation."""
+    primary_pdf_id: str
+    active_pdf_ids: Set[str] = Field(default_factory=set)
+    
+    def add_pdf_id(self, pdf_id: str) -> None:
+        """Add a PDF ID to the active set."""
+        self.active_pdf_ids.add(pdf_id)
+    
+    def remove_pdf_id(self, pdf_id: str) -> None:
+        """Remove a PDF ID from the active set."""
+        if pdf_id in self.active_pdf_ids:
+            self.active_pdf_ids.remove(pdf_id)
+    
+    @property
+    def is_multi_document(self) -> bool:
+        """Whether multiple documents are active."""
+        return len(self.active_pdf_ids) > 1
+
+# ------------------------------------------------------------------------
+# Chat Args (for ChatManager configuration)
+# ------------------------------------------------------------------------
+class ChatArgs:
+    """Arguments for chat configuration"""
+    def __init__(
+        self,
+        conversation_id: Optional[str] = None,
+        pdf_id: Optional[str] = None,
+        research_mode: ResearchMode = ResearchMode.SINGLE,
+        stream_enabled: bool = False,
+        stream_chunk_size: int = 10,
+    ):
+        self.conversation_id = conversation_id
+        self.pdf_id = pdf_id
+        self.research_mode = research_mode
+        self.stream_enabled = stream_enabled
+        self.stream_chunk_size = stream_chunk_size
+
+
+# ------------------------------------------------------------------------
+# Research Manager (forward declaration only)
+# ------------------------------------------------------------------------
+class ResearchManager:
+    """Forward declaration for the Research Manager class."""
+    def __init__(self, primary_pdf_id: str):
+        self.primary_pdf_id = primary_pdf_id
+
+    def register_concept_network(self, pdf_id: str, concept_network: ConceptNetwork) -> None:
+        """Register a concept network for a document."""
+        pass
+        
+    def register_shared_concept(self, concept: str, pdf_ids: Set[str], confidence: float) -> None:
+        """Register a shared concept across documents."""
+        pass
+        
+    def add_document_metadata(self, pdf_id: str, metadata: Dict[str, Any]) -> None:
+        """Add metadata for a document."""
+        pass
