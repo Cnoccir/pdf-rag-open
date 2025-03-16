@@ -92,7 +92,7 @@ def create_query_graph() -> StateGraph:
     # Compile the graph
     return graph.compile()
 
-def create_research_graph() -> StateGraph:
+
     """
     Create a research graph for multi-document analysis.
     This graph extends the query graph with additional research capabilities.
@@ -147,6 +147,60 @@ def create_research_graph() -> StateGraph:
     # Compile the graph
     return graph.compile()
 
+def create_research_graph() -> StateGraph:
+    """
+    Create a research graph for multi-document analysis.
+    Enhanced with Neo4j graph capabilities for analyzing relationships.
+    
+    Returns:
+        StateGraph for research
+    """
+    # Create new graph
+    graph = StateGraph(GraphState)
+    
+    # Import nodes
+    from app.chat.langgraph.nodes.conversation_memory import process_conversation_memory
+    from app.chat.langgraph.nodes.query_analyzer import analyze as query_analyzer
+    from app.chat.langgraph.nodes.retriever import retrieve_content as retriever
+    from app.chat.langgraph.nodes.knowledge_generator import generate_knowledge as knowledge_generator
+    from app.chat.langgraph.nodes.response_generator import generate_response as response_generator
+    from app.chat.langgraph.nodes.research_synthesizer import research_synthesize as research_synthesizer
+    
+    # Add nodes
+    graph.add_node("conversation_memory", process_conversation_memory)
+    graph.add_node("query_analyzer", query_analyzer)
+    graph.add_node("retriever", retriever)
+    graph.add_node("research_synthesizer", research_synthesizer)  # Neo4j-aware research synthesizer
+    graph.add_node("knowledge_generator", knowledge_generator)
+    graph.add_node("response_generator", response_generator)
+    
+    # Define edges
+    graph.set_entry_point("conversation_memory")
+    graph.add_edge("conversation_memory", "query_analyzer")
+    graph.add_edge("query_analyzer", "retriever")
+    graph.add_edge("retriever", "research_synthesizer")  # Flow through research synthesizer
+    graph.add_edge("research_synthesizer", "knowledge_generator")
+    graph.add_edge("knowledge_generator", "response_generator")
+    
+    # Add final conversation memory processing to capture generated response
+    graph.add_edge("response_generator", "conversation_memory")
+    
+    # Define final edge to END state
+    def should_end(state: GraphState) -> str:
+        """Determine if we should end the graph."""
+        # If we already have a response and have been through conversation_memory twice, end
+        if (state.generation_state and state.generation_state.response and 
+            state.conversation_state and state.conversation_state.metadata.get("processed_response", False)):
+            return END
+        return "query_analyzer"
+    
+    graph.add_conditional_edges(
+        "conversation_memory",
+        should_end
+    )
+    
+    # Compile the graph
+    return graph.compile()
 # Example usage functions
 async def process_document_async(pdf_id: str) -> Dict[str, Any]:
     """

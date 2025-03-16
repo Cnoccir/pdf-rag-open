@@ -1,3 +1,8 @@
+"""
+Enhanced document processor with Neo4j vector store integration.
+Handles document extraction, processing, and ingestion for LangGraph RAG system.
+"""
+
 import asyncio
 import aiofiles
 import base64
@@ -83,7 +88,7 @@ logger = logging.getLogger(__name__)
 
 class DocumentProcessor:
     """
-    Enhanced document processor with optimized Docling integration.
+    Enhanced document processor with Neo4j integration.
     Focuses on preserving document structure, domain knowledge integration,
     and hierarchical relationships for technical documentation.
     """
@@ -114,7 +119,7 @@ class DocumentProcessor:
 
     async def process_document(self) -> ProcessingResult:
         """
-        Process document with comprehensive error handling and optimization.
+        Process document with Neo4j integration for relationship preservation.
         Preserves document structure and extracts rich metadata.
         Enhanced with document summarization and category detection.
         """
@@ -144,7 +149,7 @@ class DocumentProcessor:
             logger.info(f"Generating optimized chunks for {self.pdf_id}")
             chunks = self._generate_chunks(self.docling_doc)
 
-            # 6. Build concept network from document content using our updated utilities
+            # 6. Build concept network from document content
             logger.info(f"Building concept network for {self.pdf_id}")
             await self._build_concept_network(elements, chunks)
 
@@ -160,7 +165,7 @@ class DocumentProcessor:
                 text=md_content,
                 technical_terms=all_technical_terms,
                 relationships=self.concept_network.relationships,
-                openai_client=self.openai_client  # Pass the OpenAI client for LLM assistance
+                openai_client=self.openai_client
             )
 
             # 10. Predict document category
@@ -176,13 +181,18 @@ class DocumentProcessor:
                 markdown_content=md_content,
                 markdown_path=str(self.markdown_path),
                 concept_network=self.concept_network,
-                visual_elements=visual_elements
+                visual_elements=visual_elements,
+                document_summary=document_summary  # Added document summary
             )
 
-            # 12. Update PDF metadata in database with enhanced summary and description
+            # 12. Store processed content in Neo4j vector store
+            logger.info(f"Ingesting content to Neo4j for {self.pdf_id}")
+            await self._ingest_to_neo4j(result)
+
+            # 13. Update PDF metadata in database with enhanced summary and description
             await self._update_pdf_metadata(document_summary, predicted_category)
 
-            # 13. Register document metadata with research manager if available
+            # 14. Register document metadata with research manager if available
             if self.research_manager:
                 document_stats = result.get_statistics()
 
@@ -205,10 +215,10 @@ class DocumentProcessor:
                     },
                     "top_technical_terms": list(document_stats["top_technical_terms"].keys())[:20],
                     "domain_category": predicted_category,
-                    "description": description  # Add description for research context
+                    "description": description
                 })
 
-            # 14. Save results with optimized storage
+            # 15. Save results with optimized storage
             await self._save_results(result)
 
             # Record total processing time
@@ -1430,6 +1440,107 @@ class DocumentProcessor:
             except Exception:
                 pass
 
+    async def _ingest_to_neo4j(self, result: ProcessingResult) -> bool:
+        """
+        Ingest processed content into Neo4j vector store.
+        This is the key connection point between document processing and Neo4j.
+        
+        Args:
+            result: Processing result with elements and concept network
+        
+        Returns:
+            Success status
+        """
+        logger.info(f"Ingesting processed content to Neo4j for {self.pdf_id}")
+        
+        try:
+            # Get Neo4j vector store
+            from app.chat.vector_stores import get_vector_store
+            vector_store = get_vector_store()
+            
+            # Verify it's initialized
+            if not vector_store.initialized:
+                logger.error(f"Neo4j vector store not initialized for {self.pdf_id}")
+                return False
+            
+            # 1. Create document node first
+            document_title = "Untitled Document"
+            if hasattr(result, 'document_summary') and result.document_summary:
+                if 'title' in result.document_summary:
+                    document_title = result.document_summary['title']
+            
+            metadata = {
+                "processed_at": datetime.utcnow().isoformat(),
+                "element_count": len(result.elements),
+                "domain_category": self._predict_document_category(
+                    self._extract_all_technical_terms(result.elements), 
+                    result.markdown_content
+                )
+            }
+            
+            # Add document summary to metadata if available
+            if hasattr(result, 'document_summary') and result.document_summary:
+                metadata["document_summary"] = result.document_summary
+            
+            # Create document node
+            await vector_store.create_document_node(
+                pdf_id=self.pdf_id,
+                title=document_title,
+                metadata=metadata
+            )
+            
+            # 2. Add content elements with appropriate relationships
+            for element in result.elements:
+                await vector_store.add_content_element(element, self.pdf_id)
+            
+            # 3. Add concepts and their relationships
+            if hasattr(result, 'concept_network') and result.concept_network:
+                # Add concepts
+                for concept in result.concept_network.concepts:
+                    await vector_store.add_concept(
+                        concept_name=concept.name,
+                        pdf_id=self.pdf_id,
+                        metadata={
+                            "importance": concept.importance_score,
+                            "is_primary": concept.is_primary,
+                            "category": concept.category
+                        }
+                    )
+                
+                # Add relationships between concepts
+                for relationship in result.concept_network.relationships:
+                    rel_type = relationship.type
+                    if hasattr(rel_type, 'value'):
+                        rel_type = rel_type.value
+                    
+                    await vector_store.add_concept_relationship(
+                        source=relationship.source,
+                        target=relationship.target,
+                        rel_type=str(rel_type),
+                        pdf_id=self.pdf_id,
+                        metadata={
+                            "weight": relationship.weight,
+                            "context": relationship.context
+                        }
+                    )
+                
+                # Add section-concept relationships
+                if hasattr(result.concept_network, 'section_concepts'):
+                    for section, concepts in result.concept_network.section_concepts.items():
+                        for concept in concepts:
+                            await vector_store.add_section_concept_relation(
+                                section=section,
+                                concept=concept,
+                                pdf_id=self.pdf_id
+                            )
+            
+            logger.info(f"Successfully ingested content to Neo4j for {self.pdf_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to ingest content to Neo4j: {str(e)}", exc_info=True)
+            return False
+
     async def _save_results(self, result: ProcessingResult) -> None:
         """Save processing results to disk with comprehensive organization."""
         try:
@@ -1500,6 +1611,7 @@ class DocumentProcessor:
                     },
                     "domain_term_counts": dict(self.domain_term_counters)
                 },
+                "neo4j_status": "ingested"  # Add Neo4j status
             }
 
             # Save metadata
@@ -1518,13 +1630,13 @@ class DocumentProcessor:
 
 async def process_technical_document(
     pdf_id: str,
-    config: ProcessingConfig,
-    openai_client: AsyncOpenAI,
-    research_manager=None,
+    config: Optional[ProcessingConfig] = None,
+    openai_client: Optional[AsyncOpenAI] = None,
+    research_manager = None,
     output_dir: Optional[Path] = None
 ) -> ProcessingResult:
     """
-    Process technical document with LangGraph integration and structured output.
+    Process technical document with Neo4j integration and LangGraph compatibility.
     Optimized for technical documentation with concept extraction and relationship mapping.
 
     Args:
@@ -1537,8 +1649,27 @@ async def process_technical_document(
     Returns:
         ProcessingResult with LangGraph-ready structured content
     """
-    logger.info(f"Starting LangGraph-integrated document processing pipeline for {pdf_id}")
+    logger.info(f"Starting Neo4j-integrated document processing pipeline for {pdf_id}")
+    
+    # Default config if not provided
+    if not config:
+        config = ProcessingConfig(
+            pdf_id=pdf_id,
+            chunk_size=500,  # Optimal for technical content
+            chunk_overlap=100,  # Better context preservation
+            embedding_model="text-embedding-3-small",
+            process_images=True,
+            process_tables=True,
+            extract_technical_terms=True,
+            extract_relationships=True,
+            max_concepts_per_document=200
+        )
+    
+    # Default OpenAI client if not provided
+    if not openai_client:
+        openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+    # Create processor instance
     processor = DocumentProcessor(pdf_id, config, openai_client, research_manager)
 
     if output_dir:
@@ -1546,34 +1677,27 @@ async def process_technical_document(
         processor._setup_directories()
 
     try:
-        # Process document with LangGraph-optimized output
+        # Process document with Neo4j integration
         result = await processor.process_document()
         
-        # Add LangGraph-specific metadata to the result
-        # This enables smooth integration with LangGraph nodes
-        langgraph_metadata = {
+        # Add LangGraph-specific metadata
+        if not result.raw_data:
+            result.raw_data = {}
+            
+        result.raw_data["langgraph"] = {
             "node_ready": True,
             "document_structure": processor.section_hierarchy if hasattr(processor, "section_hierarchy") else [],
             "primary_concepts": [c.name for c in processor.concept_network.concepts[:5]] if processor.concept_network and processor.concept_network.concepts else [],
-            "technical_domain": processor.domain_classification if hasattr(processor, "domain_classification") else "technical",
-            "processing_timestamp": datetime.utcnow().isoformat()
+            "technical_domain": processor._predict_document_category(
+                processor._extract_all_technical_terms(result.elements), 
+                result.markdown_content
+            ),
+            "processing_timestamp": datetime.utcnow().isoformat(),
+            "neo4j_ready": True  # Indicate Neo4j storage is ready
         }
         
-        # Add LangGraph metadata to the result
-        if not result.raw_data:
-            result.raw_data = {}
-        result.raw_data["langgraph"] = langgraph_metadata
-        
-        # Ensure document summary is included
-        if hasattr(processor, "document_summary") and processor.document_summary:
-            result.document_summary = processor.document_summary
-        
-        # Ensure concept network is included
-        if hasattr(processor, "concept_network") and processor.concept_network:
-            result.concept_network = processor.concept_network
-        
         logger.info(
-            f"Completed LangGraph-ready processing for {pdf_id} with "
+            f"Completed Neo4j-integrated processing for {pdf_id} with "
             f"{len(result.elements)} elements, "
             f"{len(result.chunks) if hasattr(result, 'chunks') else 0} chunks, and "
             f"{len(processor.concept_network.concepts) if hasattr(processor, 'concept_network') and processor.concept_network else 0} concepts"
@@ -1589,7 +1713,8 @@ async def process_technical_document(
                 "error": str(e),
                 "error_type": type(e).__name__,
                 "timestamp": datetime.utcnow().isoformat(),
-                "langgraph_ready": False
+                "langgraph_ready": False,
+                "neo4j_ready": False
             }
         )
         try:
@@ -1600,7 +1725,8 @@ async def process_technical_document(
                     "error": str(e),
                     "timestamp": datetime.utcnow().isoformat(),
                     "pdf_id": pdf_id,
-                    "langgraph_ready": False
+                    "langgraph_ready": False,
+                    "neo4j_ready": False
                 }, indent=2))
         except Exception:
             pass
