@@ -10,7 +10,7 @@ from datetime import datetime
 from openai import AsyncOpenAI
 import os
 
-from app.chat.langgraph.state import DocumentState, GraphState
+from app.chat.langgraph.state import GraphState
 from app.chat.types import ProcessingConfig, ContentElement, ConceptNetwork
 from app.chat.models.conversation import ConversationState, MessageType
 from app.chat.errors import DocumentProcessingError
@@ -121,12 +121,15 @@ class DocumentProcessor:
         elements = []
         for item in content:
             element = ContentElement(
+                element_id=f"element_{len(elements)}",
                 content=item["content"],
-                metadata=ContentMetadata(
-                    page=item.get("page", 1),
-                    section=item.get("metadata", {}).get("section", ""),
-                    content_type=item.get("type", "text"),
-                )
+                content_type=item.get("type", "text"),
+                pdf_id="sample_pdf",
+                metadata={
+                    "page_number": item.get("page", 1),
+                    "section": item.get("metadata", {}).get("section", ""),
+                    "content_type": item.get("type", "text"),
+                }
             )
             elements.append(element)
         
@@ -145,16 +148,7 @@ class DocumentProcessor:
         for i, element in enumerate(elements):
             try:
                 # Add the document to the vector store
-                vector_store.add_texts(
-                    texts=[element.content],
-                    metadatas=[{
-                        "pdf_id": pdf_id,
-                        "page": element.metadata.page,
-                        "section": element.metadata.section,
-                        "content_type": element.metadata.content_type,
-                        "element_id": f"{pdf_id}-{i}"
-                    }]
-                )
+                await vector_store.add_content_element(element, pdf_id)
                 
                 if i > 0 and i % 10 == 0:
                     logger.info(f"Stored {i}/{len(elements)} elements for document {pdf_id}")
@@ -220,13 +214,26 @@ async def process_document(state: GraphState) -> GraphState:
     Returns:
         Updated graph state
     """
-    pdf_id = state.conversation.metadata.get("pdf_id")
+    # Get PDF ID from conversation metadata or document_state
+    pdf_id = None
+    
+    if state.conversation_state and state.conversation_state.metadata:
+        pdf_id = state.conversation_state.metadata.get("pdf_id")
+    
+    if not pdf_id and state.document_state:
+        if isinstance(state.document_state, dict):
+            pdf_id = state.document_state.get("pdf_id")
+        else:
+            # For backward compatibility
+            pdf_id = getattr(state.document_state, "pdf_id", None)
+    
     if not pdf_id:
-        logger.warning("No PDF ID specified in conversation metadata")
-        state.conversation.add_message(
-            MessageType.SYSTEM,
-            "Document processing failed: No PDF ID specified"
-        )
+        logger.warning("No PDF ID specified in state")
+        if state.conversation_state:
+            state.conversation_state.add_message(
+                MessageType.SYSTEM,
+                "Document processing failed: No PDF ID specified"
+            )
         return state
     
     logger.info(f"Processing document with PDF ID: {pdf_id}")
@@ -239,32 +246,34 @@ async def process_document(state: GraphState) -> GraphState:
         result = await processor.process_document(pdf_id)
         
         # Update state with processing results
-        state.document = DocumentState(
-            pdf_id=pdf_id,
-            status=result["status"],
-            element_count=result.get("element_count", 0),
-            summary=result.get("summary", ""),
-            concepts=result.get("concepts", {}),
-            timestamp=result.get("timestamp", datetime.utcnow().isoformat())
-        )
+        state.document_state = {
+            "pdf_id": pdf_id,
+            "status": result["status"],
+            "element_count": result.get("element_count", 0),
+            "summary": result.get("summary", ""),
+            "concepts": result.get("concepts", {}),
+            "timestamp": result.get("timestamp", datetime.utcnow().isoformat())
+        }
         
         # Add system message with processing result
-        if result["status"] == "complete":
-            state.conversation.add_message(
-                MessageType.SYSTEM,
-                f"Document processed successfully. Extracted {result.get('element_count', 0)} elements."
-            )
-        else:
-            state.conversation.add_message(
-                MessageType.SYSTEM,
-                f"Document processing failed: {result.get('error', 'Unknown error')}"
-            )
+        if state.conversation_state:
+            if result["status"] == "complete":
+                state.conversation_state.add_message(
+                    MessageType.SYSTEM,
+                    f"Document processed successfully. Extracted {result.get('element_count', 0)} elements."
+                )
+            else:
+                state.conversation_state.add_message(
+                    MessageType.SYSTEM,
+                    f"Document processing failed: {result.get('error', 'Unknown error')}"
+                )
     
     except Exception as e:
         logger.error(f"Error in document processing node: {str(e)}", exc_info=True)
-        state.conversation.add_message(
-            MessageType.SYSTEM,
-            f"Document processing failed due to an error: {str(e)}"
-        )
+        if state.conversation_state:
+            state.conversation_state.add_message(
+                MessageType.SYSTEM,
+                f"Document processing failed due to an error: {str(e)}"
+            )
     
     return state

@@ -62,6 +62,14 @@ def process_document(self, pdf_id: str, config: Optional[Dict[str, Any]] = None)
                 vector_store = get_vector_store()
                 if not vector_store.initialized:
                     logger.warning(f"Vector store not initialized for {normalized_pdf_id}")
+                else:
+                    # Initialize database schema if driver is connected
+                    # This properly awaits the async database setup
+                    db_initialized = await vector_store.initialize_database()
+                    if db_initialized:
+                        logger.info(f"Neo4j vector store initialized successfully")
+                    else:
+                        logger.warning(f"Vector store not fully initialized for {normalized_pdf_id}")
                 
                 # Process the document using document_fetcher
                 result = await process_technical_document(

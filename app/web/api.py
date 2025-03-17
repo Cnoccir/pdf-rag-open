@@ -2,7 +2,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 import logging
 import asyncio
-from fastapi import HTTPException
+from flask import jsonify, abort
 
 from app.chat.chat_manager import ChatManager
 from app.chat.types import ChatArgs, ResearchMode
@@ -61,7 +61,7 @@ async def process_query(
         
     except Exception as e:
         logger.error(f"Error processing query: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
+        return {"error": f"Query processing failed: {str(e)}"}, 500
 
 async def process_document(pdf_id: str) -> Dict[str, Any]:
     """
@@ -84,7 +84,7 @@ async def process_document(pdf_id: str) -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Error processing document: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Document processing failed: {str(e)}")
+        return {"error": f"Document processing failed: {str(e)}"}, 500
 
 def get_conversation_history(conversation_id: str) -> Dict[str, Any]:
     """
@@ -98,10 +98,10 @@ def get_conversation_history(conversation_id: str) -> Dict[str, Any]:
     """
     try:
         # Load conversation from memory manager
-        conversation_state = memory_manager.load_conversation(conversation_id)
+        conversation_state = run_async(memory_manager.load_conversation(conversation_id))
         
         if not conversation_state:
-            raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found")
+            return {"error": f"Conversation {conversation_id} not found"}, 404
         
         # Initialize chat manager to format the conversation
         chat_args = ChatArgs(conversation_id=conversation_id)
@@ -119,11 +119,9 @@ def get_conversation_history(conversation_id: str) -> Dict[str, Any]:
             "metadata": conversation_state.metadata
         }
         
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error retrieving conversation history: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve conversation history: {str(e)}")
+        return {"error": f"Failed to retrieve conversation history: {str(e)}"}, 500
 
 def clear_conversation(conversation_id: str) -> Dict[str, Any]:
     """
@@ -140,11 +138,14 @@ def clear_conversation(conversation_id: str) -> Dict[str, Any]:
         chat_args = ChatArgs(conversation_id=conversation_id)
         chat_manager = ChatManager(chat_args)
         
+        # Initialize first (which loads the conversation)
+        run_async(chat_manager.initialize())
+        
         # Clear conversation
         success = chat_manager.clear_conversation()
         
         if not success:
-            raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found or could not be cleared")
+            return {"error": f"Conversation {conversation_id} not found or could not be cleared"}, 404
             
         return {
             "status": "success",
@@ -152,11 +153,9 @@ def clear_conversation(conversation_id: str) -> Dict[str, Any]:
             "message": f"Conversation {conversation_id} cleared successfully"
         }
         
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error clearing conversation: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to clear conversation: {str(e)}")
+        return {"error": f"Failed to clear conversation: {str(e)}"}, 500
 
 # Helper function to run async functions in sync contexts
 def run_async(coro):

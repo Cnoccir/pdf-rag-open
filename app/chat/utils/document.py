@@ -13,7 +13,7 @@ from datetime import datetime
 from collections import defaultdict
 
 # These imports reference the new modular layout
-from .extraction import extract_technical_terms, ALL_DOMAIN_TERMS, DOMAIN_SPECIFIC_TERMS
+from .extraction import extract_technical_terms
 
 __all__ = [
     "generate_document_summary",

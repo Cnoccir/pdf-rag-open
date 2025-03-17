@@ -107,24 +107,36 @@ class Neo4jVectorStore:
                 openai_api_key=os.getenv("OPENAI_API_KEY")
             )
             
-            # Set initialization flag
+            # Set initialization flag - we'll mark as true even without database setup
+            # since connection is established
             self.initialized = True
             
-            # Setup database async 
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            loop.run_until_complete(self._setup_database())
-            
-            logger.info(f"Neo4j vector store initialized at {self.url}")
+            # Skip immediate database setup - will happen on first use
+            logger.info(f"Neo4j vector store connection initialized at {self.url}")
             
         except Exception as e:
             logger.error(f"Failed to initialize Neo4j vector store: {str(e)}")
             self.initialized = False
+
+    async def initialize_database(self) -> bool:
+        """
+        Initialize database schema.
+        Call this method before using the vector store in async contexts.
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if not self.initialized:
+            logger.error("Cannot initialize database - driver not initialized")
+            return False
+            
+        try:
+            await self._setup_database()
+            logger.info("Neo4j database schema initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize Neo4j database schema: {str(e)}")
+            return False
     
     async def _setup_database(self) -> None:
         """Set up Neo4j database with necessary indexes and constraints."""

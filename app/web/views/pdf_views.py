@@ -8,7 +8,8 @@ from app.web.tasks.embeddings import process_document
 from app.web import files
 from app.web.db import db
 from app.chat.types import ProcessingConfig, ResearchManager
-from app.chat.vector_stores.vector_store import TechDocVectorStore
+# Update import to use the new location
+from app.chat.vector_stores import TechDocVectorStore, get_vector_store
 import uuid
 import asyncio
 from datetime import datetime
@@ -289,10 +290,8 @@ def handle_pdf(pdf):
             research_manager = ResearchManager(primary_pdf_id=pdf.id)
 
             # Create store instance with both config and research manager
-            store = TechDocVectorStore(
-                research_manager=research_manager,
-                processing_config=config
-            )
+            # Use get_vector_store() instead of creating a new instance
+            store = get_vector_store()
 
             try:
                 # Create a coroutine and run it

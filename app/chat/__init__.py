@@ -1,4 +1,9 @@
-#app/chat/__init__.py
+"""
+PDF RAG system with LangGraph architecture and Neo4j integration.
+This module provides comprehensive document processing, querying, and
+multi-document research capabilities for technical documentation.
+"""
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -30,7 +35,6 @@ from app.chat.types import (
     # Research Models
     ResearchManager,
     ResearchContext,
-    DocumentSummary,
 
     # Search Models
     SearchQuery,
@@ -48,11 +52,14 @@ from app.chat.models import (
     ConceptMetadata
 )
 
-# Import document processor
+# Import document processor directly from the module
 from app.chat.langgraph.nodes.document_processor import DocumentProcessor
 
 # Import chat manager for LangGraph
 from app.chat.chat_manager import ChatManager
+
+# Import scoring functionality (for backward compatibility)
+from app.chat.scoring import score_conversation, get_scores, get_conversation_scores
 
 def initialize_chat(chat_args):
     """
@@ -108,7 +115,6 @@ __all__ = [
     # Research Models
     "ResearchManager",
     "ResearchContext",
-    "DocumentSummary",
 
     # Search Models
     "SearchQuery",
@@ -128,5 +134,10 @@ __all__ = [
 
     # Chat Functions
     "initialize_chat",
-    "ChatManager"
+    "ChatManager",
+    
+    # Scoring Functions
+    "score_conversation",
+    "get_scores",
+    "get_conversation_scores"
 ]

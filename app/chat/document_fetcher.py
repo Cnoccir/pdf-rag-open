@@ -52,9 +52,7 @@ from langchain_core.documents import Document
 # Import from modular utils
 from app.chat.utils.extraction import (
     extract_technical_terms,
-    extract_document_relationships,
-    DOMAIN_SPECIFIC_TERMS,
-    ALL_DOMAIN_TERMS
+    extract_document_relationships
 )
 from app.chat.utils.tokenization import get_tokenizer
 from app.chat.utils.document import (
@@ -82,7 +80,7 @@ from app.chat.types import (
     Concept,
     RelationType
 )
-from app.chat.errors import ProcessingError
+from app.chat.errors import DocumentProcessingError
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +128,7 @@ class DocumentProcessor:
             # 1. Download and convert the document
             content = self._download_content()
             if not content:
-                raise ProcessingError(f"No content found for PDF {self.pdf_id}")
+                raise DocumentProcessingError(f"No content found for PDF {self.pdf_id}")
 
             # 2. Convert document to Docling format
             logger.info(f"Converting document {self.pdf_id}")
@@ -242,11 +240,11 @@ class DocumentProcessor:
             from app.web.files import download_file_content
             content = download_file_content(self.pdf_id)
             if not content:
-                raise ProcessingError(f"Failed to download content for {self.pdf_id}")
+                raise DocumentProcessingError(f"Failed to download content for {self.pdf_id}")
             return content
         except Exception as e:
             logger.error(f"Download failed: {str(e)}")
-            raise ProcessingError(f"Content download failed: {str(e)}")
+            raise DocumentProcessingError(f"Content download failed: {str(e)}")
 
     async def _convert_document(self, content: bytes) -> DoclingDocument:
         """Convert raw PDF to DoclingDocument with image preservation."""
@@ -299,7 +297,7 @@ class DocumentProcessor:
 
         except Exception as e:
             logger.error(f"Document conversion failed: {e}", exc_info=True)
-            raise ProcessingError(f"Document conversion failed: {e}")
+            raise DocumentProcessingError(f"Document conversion failed: {e}")
 
     async def _extract_markdown(self, doc: DoclingDocument) -> str:
         """Extract markdown using Docling's export method."""
@@ -1730,4 +1728,4 @@ async def process_technical_document(
                 }, indent=2))
         except Exception:
             pass
-        raise ProcessingError(f"Document processing pipeline failed: {e}")
+        raise DocumentProcessingError(f"Document processing pipeline failed: {e}")

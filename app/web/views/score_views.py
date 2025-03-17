@@ -19,9 +19,9 @@ def update_score(conversation):
     score_conversation(
         conversation.id,
         score,
-        llm=conversation.llm,
-        retriever=conversation.retriever,
-        memory=conversation.memory,
+        llm=conversation.llm if hasattr(conversation, "llm") else None,
+        retriever=conversation.retriever if hasattr(conversation, "retriever") else None,
+        memory=conversation.memory if hasattr(conversation, "memory") else None,
     )
 
     return {"message": "Score updated"}
@@ -31,5 +31,4 @@ def update_score(conversation):
 @login_required
 def list_scores():
     scores = get_scores()
-
     return jsonify(scores)
