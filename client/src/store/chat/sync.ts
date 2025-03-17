@@ -12,20 +12,22 @@ const _addPendingMessage = (message: Message, pendingId: number) => {
 };
 
 export const sendMessage = async (input: Message, opts: MessageOpts = {}) => {
-	set({ loading: true });
-	const pendingId = Math.random();
+  set({ loading: true, error: '', lastMessageFailed: false });
+  const pendingId = Math.random();
 
-	try {
+  try {
     _addPendingMessage(input, pendingId);
 
     const conversationId = store.get().activeConversationId;
+    if (!conversationId) {
+      throw new Error("No active conversation");
+    }
 
-		// Get research mode state from store if not specified in opts
-		const currentState = store.get();
-		const useResearch = opts.useResearch !== undefined ? opts.useResearch : currentState.researchMode;
-		const activeDocs = opts.activeDocs || currentState.activeDocuments.map(doc => doc.id);
+    // Get research mode state from store if not specified in opts
+    const currentState = store.get();
+    const useResearch = opts.useResearch !== undefined ? opts.useResearch : currentState.researchMode;
+    const activeDocs = opts.activeDocs || currentState.activeDocuments.map(doc => doc.id);
 
-		// Log research mode state for debugging
     console.log(`[sync] Sending message with research mode: ${useResearch}, activeDocs: ${activeDocs.length}`);
 
     // Include research mode parameters in the request
@@ -33,22 +35,33 @@ export const sendMessage = async (input: Message, opts: MessageOpts = {}) => {
       `/conversations/${conversationId}/messages`,
       {
         input: input.content,
+        message: input.content, // Add this for backward compatibility
         useResearch: useResearch,
         activeDocs: activeDocs,
         useStreaming: false
       }
     );
 
-		removeMessageFromActive(pendingId);
-		insertMessageToActive(responseMessage);
+    removeMessageFromActive(pendingId);
 
-		// Check if response has research mode metadata and update conversation if needed
-		if (responseMessage.metadata?.research_mode) {
-			console.log("[sync] Response includes research mode metadata:", responseMessage.metadata.research_mode);
-		}
+    if (responseMessage) {
+      insertMessageToActive(responseMessage);
+    } else {
+      throw new Error("Invalid response from server");
+    }
 
-		set({ error: '', loading: false });
-	} catch (err) {
-		set({ error: getErrorMessage(err), loading: false });
-	}
+    set({ error: '', loading: false, lastMessageFailed: false });
+    return responseMessage;
+  } catch (err) {
+    removeMessageFromActive(pendingId);
+
+    console.error("Error sending message:", err);
+    set({
+      error: getErrorMessage(err),
+      loading: false,
+      lastMessageFailed: true
+    });
+
+    return null;
+  }
 };

@@ -14,11 +14,13 @@ import {
     acceptRecommendedDocument,
     fetchAvailableDocuments,
     sendMessage,
-    regenerateResponse  // Import this from store.js
-} from './store.js';
+    regenerateResponse,
+    deleteDocument  // Import correctly from store.ts
+} from './store';
 import { sendMessage as sendStreamingMessage } from './stream';
 import { sendMessage as sendSyncMessage } from './sync';
 
+// Define the function to choose between streaming and non-streaming message sending
 const sendMessageWithMode = (message: Message, opts: MessageOpts) => {
     return opts.useStreaming ? sendStreamingMessage(message, opts) : sendSyncMessage(message, opts);
 };
@@ -40,6 +42,7 @@ export {
     acceptRecommendedDocument,
     fetchAvailableDocuments,
     DocumentInfo,
-    regenerateResponse,  // Export regenerateResponse
-    deleteDocument
+    regenerateResponse,
+    deleteDocument,
+    sendMessageWithMode  // Export this utility function
 };

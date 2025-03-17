@@ -10,22 +10,47 @@ export const api = axios.create({
 	baseURL: '/api'
 });
 
-api.interceptors.response.use(
-	(res) => res,
-	(err) => {
-		if (err.response && err.response.status >= 500) {
-			const { response } = err;
-			const message = getErrorMessage(err);
+api.interceptors.request.use(
+  (config) => {
+    console.log(`[API Request] ${config.method.toUpperCase()} ${config.url}`, config.data || '');
+    return config;
+  },
+  (error) => {
+    console.error('[API Request Error]', error);
+    return Promise.reject(error);
+  }
+);
 
-			if (message) {
-				addError({
-					contentType: response.headers['Content-Type'] || response.headers['content-type'],
-					message: getErrorMessage(err)
-				});
-			}
-		}
-		return Promise.reject(err);
-	}
+// Enhance response interceptor
+api.interceptors.response.use(
+  (response) => {
+    console.log(`[API Response] ${response.status} from ${response.config.url}`,
+                response.data || '');
+    return response;
+  },
+  (err) => {
+    if (err.response) {
+      const { status, data, config } = err.response;
+      console.error(`[API Error] ${status} from ${config.url}`, data || err.message);
+
+      if (status >= 500) {
+        const { response } = err;
+        const message = getErrorMessage(err);
+
+        if (message) {
+          addError({
+            contentType: response.headers['Content-Type'] || response.headers['content-type'],
+            message: getErrorMessage(err)
+          });
+        }
+      }
+    } else if (err.request) {
+      console.error('[API Network Error] No response received', err.request);
+    } else {
+      console.error('[API Error] Request configuration error', err.message);
+    }
+    return Promise.reject(err);
+  }
 );
 // Trigger embedding process for a document
 export async function triggerEmbeddingProcess(pdfId: string): Promise<void> {

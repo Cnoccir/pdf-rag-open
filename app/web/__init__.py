@@ -14,12 +14,15 @@ from app.web.views import (
     conversation_views,
     stream_views,
 )
+# Import the new async wrapper
+from app.web.async_wrapper import async_handler, run_async
 import os
 import logging
 from logging.handlers import RotatingFileHandler
 from langsmith import Client
 import sys
 from dotenv import load_dotenv
+import asyncio
 
 # Load environment variables
 load_dotenv()
@@ -55,10 +58,15 @@ def create_app():
     # Log configuration status
     app.logger.info("Neo4j vector store configuration loaded")
     app.logger.info(f"Using Neo4j at: {os.getenv('NEO4J_URL')}")
-    
+
     # Set up LangGraph Studio integration if enabled
     if os.getenv("LANGGRAPH_STUDIO_ENABLED", "true").lower() == "true":
         app.logger.info("LangGraph Studio integration enabled")
+
+    # Initialize asyncio policy for better Windows support if needed
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        app.logger.info("Set Windows-compatible asyncio event loop policy")
 
     register_extensions(app)
     register_hooks(app)
@@ -66,6 +74,9 @@ def create_app():
 
     if Config.CELERY["broker_url"]:
         celery_init_app(app)
+
+    # Log successful startup with async support
+    app.logger.info("PDF RAG application started with async support")
 
     return app
 
@@ -85,13 +96,13 @@ def register_extensions(app):
         ))
         file_handler.setLevel(logging.INFO)
         app.logger.addHandler(file_handler)
-    
+
     # Always add stdout handler for container environments
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(logging.INFO)
     app.logger.addHandler(handler)
     app.logger.setLevel(logging.INFO)
-    app.logger.info('PDF RAG application startup')
+    app.logger.info('PDF RAG application startup with LangGraph integration')
 
 def register_blueprints(app):
     app.register_blueprint(auth_views.bp)
@@ -99,10 +110,23 @@ def register_blueprints(app):
     app.register_blueprint(score_views.bp)
     app.register_blueprint(conversation_views.bp)
     app.register_blueprint(client_views.bp)
-    app.register_blueprint(stream_views.bp)
+
+    # Stream views are no longer needed as we handle streaming in conversation_views
+    # But keep it registered for backward compatibility
+    try:
+        app.register_blueprint(stream_views.bp)
+    except Exception as e:
+        app.logger.warning(f"Could not register stream views: {str(e)}")
 
 def register_hooks(app):
     CORS(app)
     app.before_request(load_logged_in_user)
     app.after_request(add_headers)
-    app.register_error_handler(Exception, handle_error)
+
+    # Enhanced error handling for async errors
+    @app.errorhandler(Exception)
+    def async_aware_error_handler(error):
+        if isinstance(error, asyncio.CancelledError):
+            app.logger.error("Async operation was cancelled")
+            return {"error": "Operation cancelled"}, 500
+        return handle_error(error)
