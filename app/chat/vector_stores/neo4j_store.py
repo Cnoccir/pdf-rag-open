@@ -21,8 +21,8 @@ from langchain_core.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
 
 from app.chat.types import (
-    ContentElement, 
-    ContentMetadata, 
+    ContentElement,
+    ContentMetadata,
     ContentType,
     ConceptNetwork,
     Concept,
@@ -38,17 +38,17 @@ class VectorStoreMetrics(BaseModel):
     total_errors: int = 0
     avg_query_time: float = 0.0
     total_query_time: float = 0.0
-    
+
     def record_query_time(self, time_seconds: float) -> None:
         """Record query time and update average."""
         self.total_query_time += time_seconds
         self.total_queries += 1
         self.avg_query_time = self.total_query_time / self.total_queries
-    
+
     def record_retrieval(self) -> None:
         """Record document retrieval."""
         self.total_queries += 1
-    
+
     def record_error(self, error: str) -> None:
         """Record retrieval error."""
         self.total_errors += 1
@@ -58,7 +58,7 @@ class Neo4jVectorStore:
     """
     Neo4j vector store for document storage and retrieval with graph capabilities.
     """
-    
+
     def __init__(
         self,
         url: str = "bolt://localhost:7687",
@@ -70,7 +70,7 @@ class Neo4jVectorStore:
     ):
         """
         Initialize Neo4j vector store.
-        
+
         Args:
             url: Neo4j connection URL
             username: Neo4j username
@@ -89,10 +89,10 @@ class Neo4jVectorStore:
         self.initialized = False
         self.metrics = VectorStoreMetrics()
         self.embeddings = None
-        
+
         # Initialize connection
         self._initialize()
-    
+
     def _initialize(self) -> None:
         """Initialize Neo4j driver and database."""
         try:
@@ -101,20 +101,20 @@ class Neo4jVectorStore:
                 self.url,
                 auth=(self.username, self.password)
             )
-            
+
             # Initialize embeddings
             self.embeddings = OpenAIEmbeddings(
                 model=self.embedding_model,
                 openai_api_key=os.getenv("OPENAI_API_KEY")
             )
-            
+
             # Set initialization flag - we'll mark as true even without database setup
             # since connection is established
             self.initialized = True
-            
+
             # Skip immediate database setup - will happen on first use
             logger.info(f"Neo4j vector store connection initialized at {self.url}")
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize Neo4j vector store: {str(e)}")
             self.initialized = False
@@ -123,14 +123,14 @@ class Neo4jVectorStore:
         """
         Initialize database schema.
         Call this method before using the vector store in async contexts.
-        
+
         Returns:
             bool: True if successful, False otherwise
         """
         if not self.initialized:
             logger.error("Cannot initialize database - driver not initialized")
             return False
-            
+
         try:
             await self._setup_database()
             logger.info("Neo4j database schema initialized successfully")
@@ -138,7 +138,7 @@ class Neo4jVectorStore:
         except Exception as e:
             logger.error(f"Failed to initialize Neo4j database schema: {str(e)}")
             return False
-    
+
     async def _setup_database(self) -> None:
         """Set up Neo4j database with necessary indexes and constraints."""
         try:
@@ -148,25 +148,25 @@ class Neo4jVectorStore:
                     CREATE CONSTRAINT document_id IF NOT EXISTS
                     FOR (d:Document) REQUIRE d.pdf_id IS UNIQUE
                 """)
-                
+
                 # Create content element index
                 await session.run("""
                     CREATE INDEX content_element_id IF NOT EXISTS
                     FOR (e:ContentElement) ON (e.element_id)
                 """)
-                
+
                 # Create concept index
                 await session.run("""
                     CREATE INDEX concept_name IF NOT EXISTS
                     FOR (c:Concept) ON (c.name)
                 """)
-                
+
                 # Create section index
                 await session.run("""
                     CREATE INDEX section_path IF NOT EXISTS
                     FOR (s:Section) ON (s.path)
                 """)
-                
+
                 # Create vector index if not exists
                 await session.run("""
                     CALL db.index.vector.createNodeIndex(
@@ -177,13 +177,13 @@ class Neo4jVectorStore:
                       'cosine'
                     )
                 """, {"dimension": self.embedding_dimension})
-                
+
                 logger.info("Neo4j database setup complete")
-                
+
         except Exception as e:
             logger.error(f"Database setup error: {str(e)}")
             raise
-    
+
     async def create_document_node(
         self,
         pdf_id: str,
@@ -192,7 +192,7 @@ class Neo4jVectorStore:
     ) -> None:
         """
         Create a document node in Neo4j with robust handling of complex metadata.
-        
+
         Args:
             pdf_id: Document ID
             title: Document title
@@ -201,11 +201,11 @@ class Neo4jVectorStore:
         if not self.initialized:
             logger.error("Vector store not initialized")
             return
-        
+
         try:
             # Create a completely clean metadata dictionary with only primitive values
             clean_metadata = {}
-            
+
             if metadata:
                 for key, value in metadata.items():
                     # Handle different data types appropriately
@@ -219,7 +219,6 @@ class Neo4jVectorStore:
                                 clean_metadata["doc_title"] = str(value["title"])
                         elif isinstance(value, str):
                             # If already a string (possibly JSON), store as is but with a different key
-                            # to avoid any parsing issues with the original key
                             clean_metadata["document_summary_json"] = value
                         else:
                             # For any other type, convert to string
@@ -240,10 +239,10 @@ class Neo4jVectorStore:
                     else:
                         # Convert anything else to string
                         clean_metadata[key] = str(value)
-            
+
             # Log the cleaned metadata for debugging
             logger.debug(f"Cleaned metadata for Neo4j: {list(clean_metadata.keys())}")
-            
+
             async with self.driver.session(database=self.database) as session:
                 # Create document node with clean metadata
                 await session.run("""
@@ -258,30 +257,31 @@ class Neo4jVectorStore:
                     "pdf_id": pdf_id,
                     "title": title
                 })
-                
+
                 # Then set each metadata property individually to avoid issues with the entire object
                 if clean_metadata:
                     for key, value in clean_metadata.items():
                         try:
-                            # Set each property one by one
-                            await session.run("""
-                                MATCH (d:Document {pdf_id: $pdf_id})
-                                SET d[$key] = $value
-                            """, {
+                            # Use string formatting for property name instead of parameterization
+                            # This is safe since we control the key names
+                            cypher_query = f"""
+                                MATCH (d:Document {{pdf_id: $pdf_id}})
+                                SET d.{key} = $value
+                            """
+                            await session.run(cypher_query, {
                                 "pdf_id": pdf_id,
-                                "key": key,
                                 "value": value
                             })
                         except Exception as prop_error:
                             # Log but continue if one property fails
                             logger.warning(f"Failed to set property {key}: {str(prop_error)}")
-                
-                logger.debug(f"Created document node for {pdf_id}")
-                
+
+                    logger.debug(f"Created document node for {pdf_id}")
+
         except Exception as e:
             logger.error(f"Error creating document node: {str(e)}")
             raise
-    
+
     async def add_content_element(
         self,
         element: ContentElement,
@@ -289,7 +289,7 @@ class Neo4jVectorStore:
     ) -> None:
         """
         Add a content element to Neo4j.
-        
+
         Args:
             element: Content element
             pdf_id: Document ID
@@ -297,17 +297,22 @@ class Neo4jVectorStore:
         if not self.initialized:
             logger.error("Vector store not initialized")
             return
-        
+
         try:
             # Generate embedding for content
             if not element.content:
                 logger.warning(f"Empty content for element {element.element_id}")
                 return
-            
+
             embedding = self.embeddings.embed_query(element.content)
-            
+
+            # Extract primitive metadata values
+            content_type = element.content_type.value if hasattr(element.content_type, 'value') else str(element.content_type)
+            page_number = element.metadata.page_number if hasattr(element.metadata, 'page_number') else 0
+            section = element.metadata.section if hasattr(element.metadata, 'section') else ""
+
+            # Create basic element first without complex metadata
             async with self.driver.session(database=self.database) as session:
-                # Create content element node
                 await session.run("""
                     MATCH (d:Document {pdf_id: $pdf_id})
                     MERGE (e:ContentElement {element_id: $element_id})
@@ -317,56 +322,103 @@ class Neo4jVectorStore:
                       e.page_number = $page_number,
                       e.section = $section,
                       e.embedding = $embedding,
-                      e.created_at = datetime(),
-                      e.metadata = $metadata
+                      e.created_at = datetime()
                     ON MATCH SET
                       e.content = $content,
                       e.content_type = $content_type,
                       e.page_number = $page_number,
                       e.section = $section,
                       e.embedding = $embedding,
-                      e.updated_at = datetime(),
-                      e.metadata = $metadata
+                      e.updated_at = datetime()
                     MERGE (d)-[:CONTAINS]->(e)
                 """, {
                     "pdf_id": pdf_id,
                     "element_id": element.element_id,
                     "content": element.content,
-                    "content_type": element.content_type.value if hasattr(element.content_type, 'value') else str(element.content_type),
-                    "page_number": element.metadata.page_number if hasattr(element.metadata, 'page_number') else 0,
-                    "section": element.metadata.section if hasattr(element.metadata, 'section') else "",
-                    "embedding": embedding,
-                    "metadata": element.metadata.dict() if hasattr(element.metadata, 'dict') else {}
+                    "content_type": content_type,
+                    "page_number": page_number,
+                    "section": section,
+                    "embedding": embedding
                 })
-                
-                # If section headers exist, create section hierarchy
-                if hasattr(element.metadata, 'section_headers') and element.metadata.section_headers:
-                    # Create section path string
-                    section_path = " > ".join(element.metadata.section_headers)
-                    
-                    # Create section node and relationship
-                    await session.run("""
-                        MATCH (e:ContentElement {element_id: $element_id})
-                        MERGE (s:Section {path: $path})
-                        ON CREATE SET
-                          s.level = $level,
-                          s.title = $title,
-                          s.pdf_id = $pdf_id
-                        MERGE (s)-[:CONTAINS]->(e)
-                    """, {
-                        "element_id": element.element_id,
-                        "path": section_path,
-                        "level": len(element.metadata.section_headers),
-                        "title": element.metadata.section_headers[-1] if element.metadata.section_headers else "Untitled Section",
-                        "pdf_id": pdf_id
-                    })
-                
+
+                # Now add primitive metadata properties one by one
+                if hasattr(element, 'metadata'):
+                    # Add technical terms if they exist
+                    if hasattr(element.metadata, 'technical_terms') and element.metadata.technical_terms:
+                        await session.run("""
+                            MATCH (e:ContentElement {element_id: $element_id})
+                            SET e.technical_terms = $terms
+                        """, {
+                            "element_id": element.element_id,
+                            "terms": element.metadata.technical_terms
+                        })
+
+                    # Add hierarchy level
+                    if hasattr(element.metadata, 'hierarchy_level'):
+                        await session.run("""
+                            MATCH (e:ContentElement {element_id: $element_id})
+                            SET e.hierarchy_level = $level
+                        """, {
+                            "element_id": element.element_id,
+                            "level": element.metadata.hierarchy_level
+                        })
+
+                    # Add section headers
+                    if hasattr(element.metadata, 'section_headers') and element.metadata.section_headers:
+                        await session.run("""
+                            MATCH (e:ContentElement {element_id: $element_id})
+                            SET e.section_headers = $headers
+                        """, {
+                            "element_id": element.element_id,
+                            "headers": element.metadata.section_headers
+                        })
+
+                    # Store surrounding context as string if it exists
+                    if hasattr(element.metadata, 'surrounding_context') and element.metadata.surrounding_context:
+                        await session.run("""
+                            MATCH (e:ContentElement {element_id: $element_id})
+                            SET e.surrounding_context = $context
+                        """, {
+                            "element_id": element.element_id,
+                            "context": element.metadata.surrounding_context
+                        })
+
+                    # Store image info as JSON if it exists
+                    if hasattr(element.metadata, 'image_metadata') and element.metadata.image_metadata:
+                        if hasattr(element.metadata.image_metadata, 'dict'):
+                            image_data = element.metadata.image_metadata.dict()
+                        else:
+                            image_data = {"data": str(element.metadata.image_metadata)}
+
+                        await session.run("""
+                            MATCH (e:ContentElement {element_id: $element_id})
+                            SET e.image_data = $data
+                        """, {
+                            "element_id": element.element_id,
+                            "data": json.dumps(image_data)
+                        })
+
+                    # Store table info as JSON if it exists
+                    if hasattr(element.metadata, 'table_data') and element.metadata.table_data:
+                        if hasattr(element.metadata.table_data, 'dict'):
+                            table_data = element.metadata.table_data.dict()
+                        else:
+                            table_data = {"data": str(element.metadata.table_data)}
+
+                        await session.run("""
+                            MATCH (e:ContentElement {element_id: $element_id})
+                            SET e.table_data = $data
+                        """, {
+                            "element_id": element.element_id,
+                            "data": json.dumps(table_data)
+                        })
+
                 logger.debug(f"Added content element {element.element_id}")
-                
+
         except Exception as e:
             logger.error(f"Error adding content element: {str(e)}")
             raise
-    
+
     async def add_concept(
         self,
         concept_name: str,
@@ -374,8 +426,8 @@ class Neo4jVectorStore:
         metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Add a concept to Neo4j.
-        
+        Add a concept to Neo4j with proper handling of complex metadata.
+
         Args:
             concept_name: Concept name
             pdf_id: Document ID
@@ -383,32 +435,60 @@ class Neo4jVectorStore:
         """
         if not self.initialized or not concept_name:
             return
-        
+
         try:
             async with self.driver.session(database=self.database) as session:
-                # Create concept node and relationship to document
+                # Create basic concept node first with just the name
                 await session.run("""
                     MATCH (d:Document {pdf_id: $pdf_id})
                     MERGE (c:Concept {name: $name})
                     ON CREATE SET
-                      c.created_at = datetime(),
-                      c.metadata = $metadata
+                      c.created_at = datetime()
                     ON MATCH SET
-                      c.updated_at = datetime(),
-                      c.metadata = CASE WHEN c.metadata IS NULL THEN $metadata
-                                       ELSE c.metadata END
+                      c.updated_at = datetime()
                     MERGE (d)-[:HAS_CONCEPT]->(c)
                 """, {
                     "pdf_id": pdf_id,
-                    "name": concept_name,
-                    "metadata": metadata or {}
+                    "name": concept_name
                 })
-                
+
+                # Then add metadata properties individually
+                if metadata:
+                    # Add importance score
+                    if "importance" in metadata and isinstance(metadata["importance"], (int, float)):
+                        await session.run("""
+                            MATCH (c:Concept {name: $name})
+                            SET c.importance_score = $importance
+                        """, {
+                            "name": concept_name,
+                            "importance": metadata["importance"]
+                        })
+
+                    # Add is_primary flag
+                    if "is_primary" in metadata and isinstance(metadata["is_primary"], bool):
+                        await session.run("""
+                            MATCH (c:Concept {name: $name})
+                            SET c.is_primary = $is_primary
+                        """, {
+                            "name": concept_name,
+                            "is_primary": metadata["is_primary"]
+                        })
+
+                    # Add category if present and not null
+                    if "category" in metadata and metadata["category"] is not None:
+                        await session.run("""
+                            MATCH (c:Concept {name: $name})
+                            SET c.category = $category
+                        """, {
+                            "name": concept_name,
+                            "category": str(metadata["category"])
+                        })
+
                 logger.debug(f"Added concept {concept_name} for document {pdf_id}")
-                
+
         except Exception as e:
             logger.error(f"Error adding concept: {str(e)}")
-    
+
     async def add_concept_relationship(
         self,
         source: str,
@@ -418,8 +498,8 @@ class Neo4jVectorStore:
         metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Add a relationship between concepts.
-        
+        Add a relationship between concepts with proper handling of complex metadata.
+
         Args:
             source: Source concept
             target: Target concept
@@ -429,14 +509,14 @@ class Neo4jVectorStore:
         """
         if not self.initialized or not source or not target:
             return
-        
+
         try:
             # Create dynamic relationship type based on rel_type
             # Clean relationship type for Neo4j (no spaces, special chars)
             clean_rel_type = rel_type.upper().replace(" ", "_").replace("-", "_")
-            
+
             async with self.driver.session(database=self.database) as session:
-                # Create relationship between concepts
+                # Create basic relationship first without complex metadata
                 await session.run(f"""
                     MATCH (d:Document {{pdf_id: $pdf_id}})
                     MATCH (c1:Concept {{name: $source}})
@@ -444,25 +524,49 @@ class Neo4jVectorStore:
                     MERGE (c1)-[r:{clean_rel_type}]->(c2)
                     ON CREATE SET
                       r.created_at = datetime(),
-                      r.pdf_id = $pdf_id,
-                      r.metadata = $metadata
+                      r.pdf_id = $pdf_id
                     ON MATCH SET
                       r.updated_at = datetime(),
-                      r.metadata = CASE WHEN r.metadata IS NULL THEN $metadata
-                                       ELSE r.metadata END,
                       r.count = CASE WHEN r.count IS NULL THEN 1 ELSE r.count + 1 END
                 """, {
                     "source": source,
                     "target": target,
-                    "pdf_id": pdf_id,
-                    "metadata": metadata or {}
+                    "pdf_id": pdf_id
                 })
-                
+
+                # Add metadata properties individually
+                if metadata:
+                    # Add weight if present
+                    if "weight" in metadata and isinstance(metadata["weight"], (int, float)):
+                        await session.run(f"""
+                            MATCH (c1:Concept {{name: $source}})-[r:{clean_rel_type}]->(c2:Concept {{name: $target}})
+                            WHERE r.pdf_id = $pdf_id
+                            SET r.weight = $weight
+                        """, {
+                            "source": source,
+                            "target": target,
+                            "pdf_id": pdf_id,
+                            "weight": metadata["weight"]
+                        })
+
+                    # Add context if present
+                    if "context" in metadata and metadata["context"]:
+                        await session.run(f"""
+                            MATCH (c1:Concept {{name: $source}})-[r:{clean_rel_type}]->(c2:Concept {{name: $target}})
+                            WHERE r.pdf_id = $pdf_id
+                            SET r.context = $context
+                        """, {
+                            "source": source,
+                            "target": target,
+                            "pdf_id": pdf_id,
+                            "context": str(metadata["context"])
+                        })
+
                 logger.debug(f"Added concept relationship {source} -> {target}")
-                
+
         except Exception as e:
             logger.error(f"Error adding concept relationship: {str(e)}")
-    
+
     async def add_section_concept_relation(
         self,
         section: str,
@@ -471,7 +575,7 @@ class Neo4jVectorStore:
     ) -> None:
         """
         Add a relationship between a section and a concept.
-        
+
         Args:
             section: Section path
             concept: Concept name
@@ -479,7 +583,7 @@ class Neo4jVectorStore:
         """
         if not self.initialized or not section or not concept:
             return
-        
+
         try:
             async with self.driver.session(database=self.database) as session:
                 await session.run("""
@@ -492,12 +596,12 @@ class Neo4jVectorStore:
                     "concept": concept,
                     "pdf_id": pdf_id
                 })
-                
+
                 logger.debug(f"Added section-concept relationship: {section} -> {concept}")
-                
+
         except Exception as e:
             logger.error(f"Error adding section-concept relationship: {str(e)}")
-    
+
     async def semantic_search(
         self,
         query: str,
@@ -507,26 +611,26 @@ class Neo4jVectorStore:
     ) -> List[Document]:
         """
         Perform semantic search using vector similarity.
-        
+
         Args:
             query: Query string
             k: Number of results
             pdf_id: Optional document ID filter
             content_types: Optional content type filter
-            
+
         Returns:
             List of matching documents
         """
         if not self.initialized:
             logger.error("Vector store not initialized")
             return []
-        
+
         start_time = time.time()
-        
+
         try:
             # Generate query embedding
             query_embedding = self.embeddings.embed_query(query)
-            
+
             # Build Cypher query
             cypher_query = """
                 CALL db.index.vector.queryNodes(
@@ -535,17 +639,17 @@ class Neo4jVectorStore:
                   $embedding
                 ) YIELD node, score
             """
-            
+
             # Add filters for PDF ID and content types
             filters = []
             if pdf_id:
                 filters.append("node.pdf_id = $pdf_id")
             if content_types and len(content_types) > 0:
                 filters.append("node.content_type IN $content_types")
-            
+
             if filters:
                 cypher_query += f" WHERE {' AND '.join(filters)}"
-            
+
             cypher_query += """
                 MATCH (d:Document)-[:CONTAINS]->(node)
                 RETURN
@@ -560,7 +664,7 @@ class Neo4jVectorStore:
                 ORDER BY score DESC
                 LIMIT $limit
             """
-            
+
             params = {
                 "embedding": query_embedding,
                 "k": k * 2,  # Request more candidates to allow for filtering
@@ -568,10 +672,10 @@ class Neo4jVectorStore:
                 "pdf_id": pdf_id,
                 "content_types": content_types
             }
-            
+
             async with self.driver.session(database=self.database) as session:
                 result = await session.run(cypher_query, params)
-                
+
                 documents = []
                 async for record in result:
                     # Extract data from record
@@ -585,24 +689,24 @@ class Neo4jVectorStore:
                         "score": record["score"],
                         "node_metadata": record["metadata"]
                     }
-                    
+
                     # Create LangChain document
                     doc = Document(page_content=content, metadata=metadata)
                     documents.append(doc)
-            
+
             # Record metrics
             query_time = time.time() - start_time
             self.metrics.record_query_time(query_time)
-            
+
             logger.info(f"Semantic search completed in {query_time:.2f}s, found {len(documents)} results")
-            
+
             return documents
-            
+
         except Exception as e:
             logger.error(f"Semantic search error: {str(e)}")
             self.metrics.record_error(str(e))
             return []
-    
+
     async def keyword_search(
         self,
         query: str,
@@ -611,33 +715,33 @@ class Neo4jVectorStore:
     ) -> List[Document]:
         """
         Perform keyword-based search.
-        
+
         Args:
             query: Query string
             k: Number of results
             pdf_id: Optional document ID filter
-            
+
         Returns:
             List of matching documents
         """
         if not self.initialized:
             logger.error("Vector store not initialized")
             return []
-        
+
         start_time = time.time()
-        
+
         try:
             # Extract keywords from query
             from app.chat.utils.extraction import extract_technical_terms
             keywords = extract_technical_terms(query)
-            
+
             if not keywords:
                 # If no keywords extracted, use words from the query
                 keywords = [w for w in query.split() if len(w) > 3]
-            
+
             # Build fulltext search pattern
             search_terms = " OR ".join(keywords)
-            
+
             async with self.driver.session(database=self.database) as session:
                 # Build Cypher query for keyword search
                 cypher_query = """
@@ -646,10 +750,10 @@ class Neo4jVectorStore:
                       $search_terms
                     ) YIELD node, score
                 """
-                
+
                 if pdf_id:
                     cypher_query += " WHERE node.pdf_id = $pdf_id"
-                
+
                 cypher_query += """
                     MATCH (d:Document)-[:CONTAINS]->(node)
                     RETURN
@@ -664,13 +768,13 @@ class Neo4jVectorStore:
                     ORDER BY score DESC
                     LIMIT $limit
                 """
-                
+
                 result = await session.run(cypher_query, {
                     "search_terms": search_terms,
                     "pdf_id": pdf_id,
                     "limit": k
                 })
-                
+
                 documents = []
                 async for record in result:
                     # Extract data from record
@@ -684,24 +788,24 @@ class Neo4jVectorStore:
                         "score": record["score"],
                         "node_metadata": record["metadata"]
                     }
-                    
+
                     # Create LangChain document
                     doc = Document(page_content=content, metadata=metadata)
                     documents.append(doc)
-            
+
             # Record metrics
             query_time = time.time() - start_time
             self.metrics.record_query_time(query_time)
-            
+
             logger.info(f"Keyword search completed in {query_time:.2f}s, found {len(documents)} results")
-            
+
             return documents
-            
+
         except Exception as e:
             logger.error(f"Keyword search error: {str(e)}")
             self.metrics.record_error(str(e))
             return []
-    
+
     async def hybrid_search(
         self,
         query: str,
@@ -711,22 +815,22 @@ class Neo4jVectorStore:
     ) -> List[Document]:
         """
         Perform hybrid search combining semantic and keyword search.
-        
+
         Args:
             query: Query string
             k: Number of results
             pdf_id: Optional document ID filter
             content_types: Optional content type filter
-            
+
         Returns:
             List of matching documents
         """
         if not self.initialized:
             logger.error("Vector store not initialized")
             return []
-        
+
         start_time = time.time()
-        
+
         try:
             # Perform both semantic and keyword search
             semantic_results = await self.semantic_search(
@@ -735,16 +839,16 @@ class Neo4jVectorStore:
                 pdf_id=pdf_id,
                 content_types=content_types
             )
-            
+
             keyword_results = await self.keyword_search(
                 query=query,
                 k=k,
                 pdf_id=pdf_id
             )
-            
+
             # Combine results with scoring
             combined_results = {}
-            
+
             # Add semantic results with their scores
             for doc in semantic_results:
                 doc_id = doc.metadata["id"]
@@ -753,7 +857,7 @@ class Neo4jVectorStore:
                     "semantic_score": doc.metadata["score"],
                     "keyword_score": 0.0
                 }
-            
+
             # Add keyword results or update existing ones
             for doc in keyword_results:
                 doc_id = doc.metadata["id"]
@@ -765,38 +869,38 @@ class Neo4jVectorStore:
                         "semantic_score": 0.0,
                         "keyword_score": doc.metadata["score"]
                     }
-            
+
             # Calculate combined score (weighted average)
             for doc_id, data in combined_results.items():
                 # Give slightly more weight to semantic search (60/40)
                 combined_score = (data["semantic_score"] * 0.6) + (data["keyword_score"] * 0.4)
                 data["combined_score"] = combined_score
-                
+
                 # Update document metadata with combined score
                 data["doc"].metadata["score"] = combined_score
-            
+
             # Sort by combined score and limit to k results
             sorted_results = sorted(
                 combined_results.values(),
                 key=lambda x: x["combined_score"],
                 reverse=True
             )
-            
+
             final_results = [data["doc"] for data in sorted_results[:k]]
-            
+
             # Record metrics
             query_time = time.time() - start_time
             self.metrics.record_query_time(query_time)
-            
+
             logger.info(f"Hybrid search completed in {query_time:.2f}s, found {len(final_results)} results")
-            
+
             return final_results
-            
+
         except Exception as e:
             logger.error(f"Hybrid search error: {str(e)}")
             self.metrics.record_error(str(e))
             return []
-    
+
     async def concept_search(
         self,
         query: str,
@@ -805,31 +909,31 @@ class Neo4jVectorStore:
     ) -> List[Document]:
         """
         Perform concept-based search using the graph structure.
-        
+
         Args:
             query: Query string
             k: Number of results
             pdf_id: Optional document ID filter
-            
+
         Returns:
             List of matching documents
         """
         if not self.initialized:
             logger.error("Vector store not initialized")
             return []
-        
+
         start_time = time.time()
-        
+
         try:
             # Extract concepts from query
             from app.chat.utils.extraction import extract_technical_terms
             concepts = extract_technical_terms(query)
-            
+
             if not concepts:
                 # If no concepts extracted, fall back to hybrid search
                 logger.info("No concepts extracted from query, falling back to hybrid search")
                 return await self.hybrid_search(query, k, pdf_id)
-            
+
             # Use the graph structure to find content elements related to concepts
             async with self.driver.session(database=self.database) as session:
                 cypher_query = """
@@ -838,12 +942,12 @@ class Neo4jVectorStore:
                     WITH c
                     MATCH path = (c)<-[:HAS_CONCEPT|DISCUSSES*1..3]-(element:ContentElement)
                 """
-                
+
                 if pdf_id:
                     cypher_query += """
                         MATCH (d:Document {pdf_id: $pdf_id})-[:CONTAINS]->(element)
                     """
-                
+
                 cypher_query += """
                     WITH
                       element,
@@ -867,13 +971,13 @@ class Neo4jVectorStore:
                     ORDER BY concept_count DESC, min_distance ASC
                     LIMIT $limit
                 """
-                
+
                 result = await session.run(cypher_query, {
                     "concepts": concepts,
                     "pdf_id": pdf_id,
                     "limit": k
                 })
-                
+
                 documents = []
                 async for record in result:
                     # Extract data from record
@@ -890,24 +994,24 @@ class Neo4jVectorStore:
                         "score": 1.0 / (record["min_distance"] + 1) * record["concept_count"],
                         "node_metadata": record["metadata"]
                     }
-                    
+
                     # Create LangChain document
                     doc = Document(page_content=content, metadata=metadata)
                     documents.append(doc)
-            
+
             # Record metrics
             query_time = time.time() - start_time
             self.metrics.record_query_time(query_time)
-            
+
             logger.info(f"Concept search completed in {query_time:.2f}s, found {len(documents)} results")
-            
+
             return documents
-            
+
         except Exception as e:
             logger.error(f"Concept search error: {str(e)}")
             self.metrics.record_error(str(e))
             return []
-    
+
     async def combined_search(
         self,
         query: str,
@@ -917,39 +1021,39 @@ class Neo4jVectorStore:
         """
         Perform combined search using all available strategies.
         This is the most comprehensive search method.
-        
+
         Args:
             query: Query string
             k: Number of results
             pdf_id: Optional document ID filter
-            
+
         Returns:
             List of matching documents
         """
         if not self.initialized:
             logger.error("Vector store not initialized")
             return []
-        
+
         start_time = time.time()
-        
+
         try:
             # Determine if query has concepts
             from app.chat.utils.extraction import extract_technical_terms
             concepts = extract_technical_terms(query)
             has_concepts = len(concepts) > 0
-            
+
             # Perform searches with appropriate strategies
             semantic_results = await self.semantic_search(query, k, pdf_id)
-            
+
             concept_results = []
             if has_concepts:
                 concept_results = await self.concept_search(query, k, pdf_id)
-            
+
             keyword_results = await self.keyword_search(query, k, pdf_id)
-            
+
             # Combine results with scoring
             combined_results = {}
-            
+
             # Add semantic results
             for doc in semantic_results:
                 doc_id = doc.metadata["id"]
@@ -959,7 +1063,7 @@ class Neo4jVectorStore:
                     "keyword_score": 0.0,
                     "concept_score": 0.0
                 }
-            
+
             # Add keyword results
             for doc in keyword_results:
                 doc_id = doc.metadata["id"]
@@ -972,7 +1076,7 @@ class Neo4jVectorStore:
                         "keyword_score": doc.metadata["score"],
                         "concept_score": 0.0
                     }
-            
+
             # Add concept results
             for doc in concept_results:
                 doc_id = doc.metadata["id"]
@@ -985,56 +1089,56 @@ class Neo4jVectorStore:
                         "keyword_score": 0.0,
                         "concept_score": doc.metadata["score"]
                     }
-            
+
             # Calculate combined score with weighted average
             for doc_id, data in combined_results.items():
                 # Weights: semantic (40%), concept (40%), keyword (20%)
                 weights = [0.4, 0.2, 0.4] if has_concepts else [0.6, 0.4, 0.0]
                 combined_score = (
-                    (data["semantic_score"] * weights[0]) + 
-                    (data["keyword_score"] * weights[1]) + 
+                    (data["semantic_score"] * weights[0]) +
+                    (data["keyword_score"] * weights[1]) +
                     (data["concept_score"] * weights[2])
                 )
                 data["combined_score"] = combined_score
-                
+
                 # Update document metadata with combined score
                 data["doc"].metadata["score"] = combined_score
-            
+
             # Sort by combined score and limit to k results
             sorted_results = sorted(
                 combined_results.values(),
                 key=lambda x: x["combined_score"],
                 reverse=True
             )
-            
+
             final_results = [data["doc"] for data in sorted_results[:k]]
-            
+
             # Record metrics
             query_time = time.time() - start_time
             self.metrics.record_query_time(query_time)
-            
+
             logger.info(f"Combined search completed in {query_time:.2f}s, found {len(final_results)} results")
-            
+
             return final_results
-            
+
         except Exception as e:
             logger.error(f"Combined search error: {str(e)}")
             self.metrics.record_error(str(e))
             return []
-    
+
     async def find_common_concepts(self, pdf_ids: List[str]) -> List[Dict[str, Any]]:
         """
         Find concepts that appear across multiple documents.
-        
+
         Args:
             pdf_ids: List of document IDs
-            
+
         Returns:
             List of common concepts with document references
         """
         if not self.initialized or not pdf_ids or len(pdf_ids) < 2:
             return []
-        
+
         try:
             async with self.driver.session(database=self.database) as session:
                 cypher_query = """
@@ -1060,9 +1164,9 @@ class Neo4jVectorStore:
                     ORDER BY relevance DESC, relationship_count DESC
                     LIMIT 20
                 """
-                
+
                 result = await session.run(cypher_query, {"pdf_ids": pdf_ids})
-                
+
                 common_concepts = []
                 async for record in result:
                     common_concepts.append({
@@ -1072,15 +1176,15 @@ class Neo4jVectorStore:
                         "relationship_count": record["relationship_count"],
                         "relevance": record["relevance"]
                     })
-                
+
                 logger.info(f"Found {len(common_concepts)} common concepts across {len(pdf_ids)} documents")
-                
+
                 return common_concepts
-                
+
         except Exception as e:
             logger.error(f"Error finding common concepts: {str(e)}")
             return []
-    
+
     async def find_concept_paths(
         self,
         start_concept: str,
@@ -1088,17 +1192,17 @@ class Neo4jVectorStore:
     ) -> List[Dict[str, Any]]:
         """
         Find paths between concepts across documents.
-        
+
         Args:
             start_concept: Starting concept
             pdf_ids: List of document IDs
-            
+
         Returns:
             List of concept paths
         """
         if not self.initialized or not start_concept or not pdf_ids:
             return []
-        
+
         try:
             async with self.driver.session(database=self.database) as session:
                 cypher_query = """
@@ -1122,12 +1226,12 @@ class Neo4jVectorStore:
                     ORDER BY path_length
                     LIMIT 10
                 """
-                
+
                 result = await session.run(cypher_query, {
                     "concept": start_concept,
                     "pdf_ids": pdf_ids
                 })
-                
+
                 paths = []
                 async for record in result:
                     paths.append({
@@ -1135,32 +1239,32 @@ class Neo4jVectorStore:
                         "relationship_types": record["relationship_types"],
                         "length": record["path_length"]
                     })
-                
+
                 logger.info(f"Found {len(paths)} concept paths from {start_concept}")
-                
+
                 return paths
-                
+
         except Exception as e:
             logger.error(f"Error finding concept paths: {str(e)}")
             return []
-    
+
     async def ingest_processed_content(self, result: Any) -> bool:
         """
         Ingest processed document content with enhanced error handling and metadata processing.
-        
+
         Args:
             result: ProcessingResult from document processor
-            
+
         Returns:
             Success status
         """
         if not hasattr(result, 'pdf_id') or not result.pdf_id:
             logger.error("Invalid processing result (missing pdf_id)")
             return False
-        
+
         pdf_id = result.pdf_id
         logger.info(f"Ingesting processed content for {pdf_id}")
-        
+
         try:
             # First, delete existing content to avoid duplicates (if implementing re-processing)
             try:
@@ -1170,16 +1274,16 @@ class Neo4jVectorStore:
                     await self.delete_document_content(pdf_id)
             except Exception as del_err:
                 logger.warning(f"Error checking/clearing existing document: {str(del_err)}")
-            
+
             # Extract document title with robust error handling
             title = "Untitled Document"
             doc_summary_dict = None
-            
+
             # Carefully extract document summary
             if hasattr(result, 'document_summary') and result.document_summary:
                 if hasattr(result.document_summary, 'title'):
                     title = result.document_summary.title
-                
+
                 # Get document summary as a dictionary
                 try:
                     if hasattr(result.document_summary, 'dict'):
@@ -1198,31 +1302,31 @@ class Neo4jVectorStore:
                 except Exception as dict_err:
                     logger.warning(f"Error converting document summary to dict: {str(dict_err)}")
                     doc_summary_dict = {"error": "Could not convert summary"}
-            
+
             # Prepare clean metadata with primitive values
             metadata = {
                 "processed_at": datetime.utcnow().isoformat(),
                 "element_count": len(result.elements) if hasattr(result, 'elements') else 0,
                 "chunk_count": len(result.chunks) if hasattr(result, 'chunks') else 0,
                 "domain_category": result._predict_document_category(
-                    result._extract_all_technical_terms(result.elements), 
+                    result._extract_all_technical_terms(result.elements),
                     result.markdown_content
                 ) if hasattr(result, '_predict_document_category') else "general"
             }
-            
+
             # Add document summary separately (don't nest it inside metadata)
             if doc_summary_dict:
                 # Don't add document_summary directly to metadata
                 # It will be handled properly in create_document_node
                 metadata["document_summary"] = doc_summary_dict
-            
+
             # Create document node with the prepared metadata
             await self.create_document_node(
                 pdf_id=pdf_id,
                 title=title,
                 metadata=metadata
             )
-            
+
             # Add content elements - first batch by type for better performance
             elements_by_type = {}
             for element in result.elements:
@@ -1230,11 +1334,11 @@ class Neo4jVectorStore:
                 if element_type not in elements_by_type:
                     elements_by_type[element_type] = []
                 elements_by_type[element_type].append(element)
-            
+
             # Process each type in batches
             for element_type, type_elements in elements_by_type.items():
                 logger.info(f"Processing {len(type_elements)} elements of type {element_type}")
-                
+
                 # Process in smaller batches to avoid memory issues
                 batch_size = 50
                 for i in range(0, len(type_elements), batch_size):
@@ -1247,49 +1351,58 @@ class Neo4jVectorStore:
                     # Log progress for large batches
                     if i + batch_size < len(type_elements):
                         logger.info(f"Processed {i + batch_size}/{len(type_elements)} {element_type} elements")
-            
+
             # Add concepts and relationships if available
             if hasattr(result, 'concept_network') and result.concept_network:
                 await self._add_concept_network(result.concept_network, pdf_id)
-            
+
             logger.info(f"Successfully ingested content for {pdf_id}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to ingest content: {str(e)}", exc_info=True)
             return False
-            
+
     async def _add_concept_network(self, concept_network, pdf_id: str) -> None:
-        """Helper method to add concept network to Neo4j with error handling"""
+        """
+        Helper method to add concept network to Neo4j with enhanced error handling
+        and proper metadata property handling.
+        """
         try:
             # Add concepts with batching
             concept_batch_size = 100
             concepts = concept_network.concepts if hasattr(concept_network, 'concepts') else []
-            
+
             for i in range(0, len(concepts), concept_batch_size):
                 batch = concepts[i:i+concept_batch_size]
                 for concept in batch:
                     try:
+                        # Create simplified metadata object with only primitive types
+                        concept_metadata = {
+                            "importance": float(concept.importance_score) if hasattr(concept, 'importance_score') else 0.5,
+                            "is_primary": bool(concept.is_primary) if hasattr(concept, 'is_primary') else False
+                        }
+
+                        # Only add category if it exists and is not None
+                        if hasattr(concept, 'category') and concept.category is not None:
+                            concept_metadata["category"] = str(concept.category)
+
                         await self.add_concept(
                             concept_name=concept.name,
                             pdf_id=pdf_id,
-                            metadata={
-                                "importance": concept.importance_score if hasattr(concept, 'importance_score') else 0.5,
-                                "is_primary": concept.is_primary if hasattr(concept, 'is_primary') else False,
-                                "category": concept.category if hasattr(concept, 'category') else None
-                            }
+                            metadata=concept_metadata
                         )
                     except Exception as concept_err:
                         logger.warning(f"Error adding concept {concept.name}: {str(concept_err)}")
-                
+
                 # Log progress
                 if i + concept_batch_size < len(concepts):
                     logger.info(f"Processed {i + concept_batch_size}/{len(concepts)} concepts")
-            
+
             # Add relationships with batching
             rel_batch_size = 100
             relationships = concept_network.relationships if hasattr(concept_network, 'relationships') else []
-            
+
             for i in range(0, len(relationships), rel_batch_size):
                 batch = relationships[i:i+rel_batch_size]
                 for rel in batch:
@@ -1298,24 +1411,30 @@ class Neo4jVectorStore:
                         rel_type = rel.type
                         if hasattr(rel_type, 'value'):
                             rel_type = rel_type.value
-                        
+
+                        # Create simplified metadata object with only primitive types
+                        rel_metadata = {}
+
+                        if hasattr(rel, 'weight'):
+                            rel_metadata["weight"] = float(rel.weight)
+
+                        if hasattr(rel, 'context') and rel.context:
+                            rel_metadata["context"] = str(rel.context)
+
                         await self.add_concept_relationship(
                             source=rel.source,
                             target=rel.target,
                             rel_type=str(rel_type),
                             pdf_id=pdf_id,
-                            metadata={
-                                "weight": rel.weight if hasattr(rel, 'weight') else 0.5,
-                                "context": rel.context if hasattr(rel, 'context') else ""
-                            }
+                            metadata=rel_metadata
                         )
                     except Exception as rel_err:
                         logger.warning(f"Error adding relationship: {str(rel_err)}")
-                
+
                 # Log progress
                 if i + rel_batch_size < len(relationships):
                     logger.info(f"Processed {i + rel_batch_size}/{len(relationships)} relationships")
-            
+
         except Exception as e:
             logger.error(f"Error adding concept network: {str(e)}")
 
@@ -1323,7 +1442,7 @@ class Neo4jVectorStore:
         """Check if document exists in Neo4j"""
         if not self.initialized:
             return False
-            
+
         try:
             async with self.driver.session(database=self.database) as session:
                 result = await session.run(
@@ -1344,25 +1463,25 @@ class Neo4jVectorStore:
     ) -> List[Document]:
         """
         Legacy compatibility method for similarity search (LangChain compatible).
-        
+
         Args:
             query: Query string
             k: Number of results
             filter: Filter criteria
-            
+
         Returns:
             List of matching documents
         """
         # Extract PDF ID from filter if present
         pdf_id = None
         content_types = None
-        
+
         if filter:
             if "pdf_id" in filter:
                 pdf_id = filter["pdf_id"]
             if "content_types" in filter:
                 content_types = filter["content_types"]
-        
+
         # Use semantic search
         return await self.semantic_search(
             query=query,
@@ -1370,7 +1489,7 @@ class Neo4jVectorStore:
             pdf_id=pdf_id,
             content_types=content_types
         )
-    
+
     def add_texts(
         self,
         texts: List[str],
@@ -1379,38 +1498,38 @@ class Neo4jVectorStore:
     ) -> List[str]:
         """
         Legacy compatibility method for adding texts (LangChain compatible).
-        
+
         Args:
             texts: List of text strings
             metadatas: Optional list of metadata dictionaries
             ids: Optional list of IDs
-            
+
         Returns:
             List of IDs for added texts
         """
         import asyncio
         result_ids = []
-        
+
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-        
+
         async def add_all_texts():
             nonlocal result_ids
-            
+
             for i, text in enumerate(texts):
                 # Get metadata if available
                 metadata = metadatas[i] if metadatas and i < len(metadatas) else {}
-                
+
                 # Get ID if available, otherwise generate one
                 element_id = ids[i] if ids and i < len(ids) else f"txt_{uuid.uuid4().hex}"
                 result_ids.append(element_id)
-                
+
                 # Get PDF ID from metadata
                 pdf_id = metadata.get("pdf_id", "unknown")
-                
+
                 # Create content element
                 element = ContentElement(
                     element_id=element_id,
@@ -1424,10 +1543,10 @@ class Neo4jVectorStore:
                         content_type=metadata.get("content_type", "text")
                     )
                 )
-                
+
                 # Add to Neo4j
                 await self.add_content_element(element, pdf_id)
-        
+
         loop.run_until_complete(add_all_texts())
-        
+
         return result_ids
