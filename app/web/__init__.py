@@ -24,9 +24,10 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Configure TensorFlow
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
-# Configure LangSmith
+# Configure LangSmith and LangGraph Studio
 os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "false")
 if os.getenv("LANGCHAIN_ENDPOINT"):
     os.environ["LANGCHAIN_ENDPOINT"] = os.getenv("LANGCHAIN_ENDPOINT")
@@ -35,11 +36,13 @@ if os.getenv("LANGCHAIN_API_KEY"):
 if os.getenv("LANGCHAIN_PROJECT"):
     os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT")
 
-# Configure Pinecone
-if not os.getenv("PINECONE_API_KEY") or not os.getenv("PINECONE_INDEX_NAME"):
-    raise ValueError("Missing required Pinecone environment variables")
+# Configure Neo4j (optional environment variables check)
+if not os.getenv("NEO4J_URL"):
+    os.environ["NEO4J_URL"] = "bolt://localhost:7687"
+    os.environ["NEO4J_USER"] = "neo4j"
+    os.environ["NEO4J_PASSWORD"] = "password"
 
-# Initialize LangSmith client
+# Initialize LangSmith client for tracing and visualization
 langsmith_client = Client()
 
 migrate = Migrate()
@@ -50,8 +53,12 @@ def create_app():
     app.config.from_object(Config)
 
     # Log configuration status
-    app.logger.info("Pinecone configuration loaded")
-    app.logger.info(f"Using Pinecone index: {os.getenv('PINECONE_INDEX_NAME')}")
+    app.logger.info("Neo4j vector store configuration loaded")
+    app.logger.info(f"Using Neo4j at: {os.getenv('NEO4J_URL')}")
+    
+    # Set up LangGraph Studio integration if enabled
+    if os.getenv("LANGGRAPH_STUDIO_ENABLED", "true").lower() == "true":
+        app.logger.info("LangGraph Studio integration enabled")
 
     register_extensions(app)
     register_hooks(app)
@@ -67,10 +74,24 @@ def register_extensions(app):
     migrate.init_app(app, db)
     app.cli.add_command(init_db_command)
 
-    # Add logging for LangSmith
+    # Configure logging
+    if not app.debug:
+        # Set up rotating file handler for production
+        if not os.path.exists('logs'):
+            os.mkdir('logs')
+        file_handler = RotatingFileHandler('logs/pdf_rag.log', maxBytes=10240, backupCount=5)
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+        ))
+        file_handler.setLevel(logging.INFO)
+        app.logger.addHandler(file_handler)
+    
+    # Always add stdout handler for container environments
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(logging.INFO)
     app.logger.addHandler(handler)
+    app.logger.setLevel(logging.INFO)
+    app.logger.info('PDF RAG application startup')
 
 def register_blueprints(app):
     app.register_blueprint(auth_views.bp)

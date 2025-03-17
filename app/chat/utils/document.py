@@ -13,7 +13,7 @@ from datetime import datetime
 from collections import defaultdict
 
 # These imports reference the new modular layout
-from .extraction import extract_technical_terms
+from .extraction import extract_technical_terms, DOMAIN_SPECIFIC_TERMS
 
 __all__ = [
     "generate_document_summary",
@@ -201,7 +201,14 @@ async def generate_document_summary(
             "programming": "Programming Guide",
             "security": "Security Configuration Guide",
             "database": "Database Integration Guide",
-            "network": "Network Protocol Guide"
+            "network": "Network Protocol Guide",
+            "ai": "AI/ML Technical Documentation",
+            "software": "Software Engineering Documentation",
+            "cloud": "Cloud/DevOps Guide",
+            "web": "Web Development Documentation",
+            "data_visualization": "Data Visualization Reference",
+            "langgraph": "LangGraph Framework Documentation",
+            "neo4j": "Neo4j Graph Database Guide"
         }
 
         document_type = doc_type_map.get(top_category, "Technical Document")

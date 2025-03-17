@@ -50,6 +50,7 @@ from docling.datamodel.pipeline_options import (
 from langchain_core.documents import Document
 
 # Import from modular utils
+from app.chat.utils.extraction import DOMAIN_SPECIFIC_TERMS
 from app.chat.utils.extraction import (
     extract_technical_terms,
     extract_document_relationships
@@ -1475,18 +1476,19 @@ class DocumentProcessor:
                     result.markdown_content
                 )
             }
-            
-            # Add document summary to metadata if available
+
+            # Add document summary to metadata if available as a dict
             if hasattr(result, 'document_summary') and result.document_summary:
-                metadata["document_summary"] = result.document_summary
-            
-            # Create document node
+                if hasattr(result.document_summary, 'dict'):
+                    metadata["document_summary"] = result.document_summary.dict()
+                else:
+                    metadata["document_summary"] = dict(result.document_summary)
+
             await vector_store.create_document_node(
                 pdf_id=self.pdf_id,
                 title=document_title,
                 metadata=metadata
             )
-            
             # 2. Add content elements with appropriate relationships
             for element in result.elements:
                 await vector_store.add_content_element(element, self.pdf_id)

@@ -18,7 +18,8 @@ __all__ = [
     "extract_document_relationships",
     "extract_hierarchy_relationships",
     "find_best_term_match",
-    "RelationType"
+    "RelationType",
+    "COMMON_TECHNICAL_CATEGORIES"  # Export this for use in other modules
 ]
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ except (ImportError, OSError):
     logger.warning("spaCy model not available, falling back to regex patterns for term extraction")
 
 # Common technical terminology categories that can appear in technical documents
+# Enhanced with additional domains from utils.py
 COMMON_TECHNICAL_CATEGORIES = {
     # Programming and Development
     "programming": ["function", "method", "class", "object", "variable", "parameter", "argument",
@@ -52,8 +54,28 @@ COMMON_TECHNICAL_CATEGORIES = {
     
     # AI and Machine Learning
     "ai": ["algorithm", "model", "neural network", "training", "inference", "classification",
-          "regression", "clustering", "deep learning", "machine learning", "dataset"]
+          "regression", "clustering", "deep learning", "machine learning", "dataset"],
+          
+    # Building Automation Systems
+    "building_automation": ["hvac", "temperature", "sensor", "controller", "thermostat", "building", 
+                           "zone", "setpoint", "automation", "bms", "bas", "actuator", "relay"],
+                           
+    # Niagara Framework Specific
+    "niagara": ["niagara", "tridium", "jace", "fox", "workbench", "ax", "n4", "station",
+                "bajascript", "baja", "hierarchy", "nav", "wiresheet", "px", "ord"],
+                
+    # Station Components
+    "station": ["station", "device", "driver", "network", "point", "history", "alarm", "schedule",
+               "trend", "config", "component", "service", "extension", "module"],
+               
+    # Hierarchy and Navigation
+    "hierarchy": ["hierarchy", "folder", "ordFolder", "navTree", "navigation", "slot", "tree",
+                 "structure", "organization", "tags", "tagging", "spaces"]
 }
+
+# Domain-specific terms used by document processing
+# This is maintained for backward compatibility if other code expects it
+DOMAIN_SPECIFIC_TERMS = COMMON_TECHNICAL_CATEGORIES
 
 # Common technical document content sections
 CONTENT_SECTION_PATTERNS = [

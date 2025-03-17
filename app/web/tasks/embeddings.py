@@ -89,14 +89,21 @@ def process_document(self, pdf_id: str, config: Optional[Dict[str, Any]] = None)
                 # Store processing timestamp
                 pdf.processed_at = datetime.utcnow()
                 
-                # Update PDF metadata if available
+                doc_summary_dict = None
                 if hasattr(result, 'document_summary') and result.document_summary:
-                    pdf.update_metadata({
-                        "document_summary": result.document_summary,
-                        "processed_at": datetime.utcnow().isoformat(),
-                        "neo4j_ready": True,
-                        "langgraph_ready": True
-                    })
+                    if hasattr(result.document_summary, 'dict'):
+                        doc_summary_dict = result.document_summary.dict()
+                    elif hasattr(result.document_summary, '__dict__'):
+                        doc_summary_dict = result.document_summary.__dict__
+                    else:
+                        doc_summary_dict = {"title": str(result.document_summary)}
+
+                pdf.update_metadata({
+                    "document_summary": doc_summary_dict,
+                    "processed_at": datetime.utcnow().isoformat(),
+                    "neo4j_ready": True,
+                    "langgraph_ready": True
+                })
                 
                 # Commit changes
                 db.session.commit()
