@@ -1157,7 +1157,7 @@ class DocumentProcessor:
     def _predict_document_category(self, technical_terms: List[str], content: str) -> str:
         """
         Predict document category based on detected domain terms and content.
-        Uses the counters built up during processing.
+        Uses a combined approach with priority on vendor-specific matching.
 
         Args:
             technical_terms: List of technical terms extracted from the document
@@ -1166,78 +1166,113 @@ class DocumentProcessor:
         Returns:
             Predicted category based on domain patterns
         """
-        # Use domain term counters for more reliable categorization
-        if not self.domain_term_counters:
-            # Fall back to analyzing term frequency in the technical_terms list
-            return self._legacy_predict_category(technical_terms, content)
+        # First, try vendor-specific matching (legacy approach)
+        vendor_category = self._vendor_specific_category_match(technical_terms, content)
+        if vendor_category != "general":
+            # If we have a confident vendor match, return it immediately
+            logger.info(f"Predicted vendor-specific category: {vendor_category}")
+            return vendor_category
+        
+        # If no vendor match, try the domain term counter approach
+        if self.domain_term_counters:
+            # Get the most frequent category based on term counts
+            category_counts = {
+                category: count for category, count in self.domain_term_counters.items()
+                if not category.startswith("term:")  # Filter out individual term counts
+            }
 
-        # Get the most frequent category based on term counts
-        category_counts = {
-            category: count for category, count in self.domain_term_counters.items()
-            if not category.startswith("term:")  # Filter out individual term counts
-        }
+            if category_counts:
+                # Get the top category
+                top_category = max(category_counts.items(), key=lambda x: x[1])[0]
+                
+                # Only use if we have a meaningful number of matches
+                if category_counts[top_category] > 2:
+                    # Map to output category name
+                    doc_type_map = {
+                        "niagara": "tridium",
+                        "station": "tridium",
+                        "hierarchy": "tridium",
+                        "component": "tridium",
+                        "hvac": "building_automation",
+                        "control": "building_automation",
+                        "alarm": "building_automation",
+                        "trend": "data_visualization",
+                        "interval": "data_visualization",
+                        "visualization": "data_visualization",
+                        "module": "development",
+                        "node": "development",
+                        "programming": "development",
+                        "security": "security",
+                        "database": "integration",
+                        "network": "networking"
+                    }
+                    
+                    mapped_category = doc_type_map.get(top_category, "general")
+                    logger.info(f"Predicted category based on domain terms: {mapped_category}")
+                    return mapped_category
+        
+        # Fall back to checking document content for known keywords
+        content_lower = content.lower()
+        
+        # Final check for strong vendor indicators in the content
+        if "niagara" in content_lower or "tridium" in content_lower or "jace" in content_lower:
+            return "tridium"
+        if "honeywell" in content_lower or "webs" in content_lower or "excel web" in content_lower:
+            return "honeywell"
+        if "johnson" in content_lower or "metasys" in content_lower or "jci" in content_lower:
+            return "johnson_controls"
+            
+        # If still no clear category, return general
+        return "general"
 
-        if not category_counts:
-            return "general"
-
-        # Get the top category
-        top_category = max(category_counts.items(), key=lambda x: x[1])[0]
-
-        # Map to output category name (using the original mapping but with our enhanced counters)
-        doc_type_map = {
-            "niagara": "tridium",
-            "station": "tridium",
-            "hierarchy": "tridium",
-            "component": "tridium",
-            "hvac": "building_automation",
-            "control": "building_automation",
-            "alarm": "building_automation",
-            "trend": "data_visualization",
-            "interval": "data_visualization",
-            "visualization": "data_visualization",
-            "module": "development",
-            "node": "development",
-            "programming": "development",
-            "security": "security",
-            "database": "integration",
-            "network": "networking"
-        }
-
-        return doc_type_map.get(top_category, "general")
-
-    def _legacy_predict_category(self, technical_terms: List[str], content: str) -> str:
+    def _vendor_specific_category_match(self, technical_terms: List[str], content: str) -> str:
         """
-        Legacy method to predict document category based on technical terms.
-        Used as a fallback when domain term counters are not available.
+        Specialized vendor category matching based on the legacy approach.
+        Optimized for building automation vendors.
 
         Args:
             technical_terms: List of technical terms extracted from the document
             content: Full document content
 
         Returns:
-            Predicted category string
+            Vendor category or "general" if no strong match
         """
-        # Define vendor-specific terminology
+        # Define vendor-specific terminology with expanded keyword lists
         vendor_terms = {
             "tridium": {
+                # Core platform terms
                 "niagara", "jace", "vykon", "workbench", "baja", "fox", "ax", "n4",
                 "iojas", "nrio", "ntec", "niagaraax", "niagara4", "station", "tridium",
-                "hierarchy", "nav", "navtree", "hierarchy definition", "hierarchyservice"
+                "hierarchy", "nav", "navtree", "hierarchy definition", "hierarchyservice",
+                # Additional Tridium-specific terms
+                "bajascript", "wire sheet", "px", "px page", "slot", "ordinal", "ord",
+                "property sheet", "palette", "workbench", "wb", "supervisor", "supervisor web",
+                "niagara framework", "ndriver", "ntransport"
             },
             "honeywell": {
+                # Core Honeywell terms
                 "honeywell", "webs", "websx", "c-bus", "economizer", "spyder", "sylk",
                 "excel", "eaglehawk", "jade", "lynx", "centraline", "wcps", "cbs",
-                "excel web", "symmetre", "honeyweb", "analytics", "wpa", "ebi"
+                "excel web", "symmetre", "honeyweb", "analytics", "wpa", "ebi",
+                # Additional Honeywell-specific terms
+                "smartvfd", "honeynet", "arena", "care", "comfort point", "comfortpoint",
+                "enterprise buildings integrator", "webs-ax", "webs-n4", "sauter"
             },
             "johnson_controls": {
+                # Core JCI terms
                 "johnson", "metasys", "fec", "fas", "fms", "cctp", "vma", "vav", "nae",
                 "ncm", "adc", "ddc", "vfd", "bacnet", "n2", "fpm", "n1", "bacpack",
-                "jci", "field controller", "facility explorer", "jc companion"
+                "jci", "field controller", "facility explorer", "jc companion",
+                # Additional Johnson Controls terms
+                "metasys extended architecture", "network engine", "m4-workstation",
+                "fec", "vma", "adc", "tec", "smartvav", "cvs", "cds", "m4", "m5",
+                "ms/tp", "n1", "n2", "lon", "johnson controls"
             }
         }
 
         # Count matches for each vendor
         match_counts = {vendor: 0 for vendor in vendor_terms}
+        strong_indicators = {vendor: [] for vendor in vendor_terms}
 
         # Check each technical term against vendor-specific terminology
         for term in technical_terms:
@@ -1247,19 +1282,46 @@ class DocumentProcessor:
                 for v_term in terms:
                     if v_term in term_lower or term_lower in v_term:
                         match_counts[vendor] += 1
+                        # Keep track of what terms matched for debugging
+                        strong_indicators[vendor].append(term)
                         break
 
-        # Check content for more vendor mentions (in case terms aren't in the extracted technical terms)
+        # Check content for direct vendor mentions
         content_lower = content.lower()
         for vendor, terms in vendor_terms.items():
             for term in terms:
                 if term in content_lower:
-                    match_counts[vendor] += 0.5  # Lower weight for raw content matches
+                    # Full term match in content gets higher weight
+                    if f" {term} " in f" {content_lower} ":  # Ensure it's a whole word
+                        match_counts[vendor] += 1
+                    else:
+                        match_counts[vendor] += 0.5  # Partial match gets lower weight
 
-        # Find the vendor with the highest match count
+        # Log what we found for debugging/visibility
+        for vendor, count in match_counts.items():
+            if count > 0:
+                logger.debug(f"Vendor match: {vendor}, count: {count}, indicators: {strong_indicators[vendor][:5]}")
+
+        # Find the vendor with the highest match count - require stronger confidence
         if max(match_counts.values()) > 2:  # Require at least 2 matches for confident categorization
             best_vendor = max(match_counts.items(), key=lambda x: x[1])[0]
+            logger.info(f"Strong vendor match found: {best_vendor} with {match_counts[best_vendor]} indicators")
             return best_vendor
+
+        # If we have some matches but not enough for confidence, check some heuristics
+        if max(match_counts.values()) > 0:
+            best_vendor = max(match_counts.items(), key=lambda x: x[1])[0]
+            
+            # Check for strong vendor-specific titles
+            if "metasys" in content_lower[:500]:  # Check document title/header
+                return "johnson_controls"
+            if "niagara" in content_lower[:500] or "tridium" in content_lower[:500]:
+                return "tridium"
+            if "honeywell" in content_lower[:500]:
+                return "honeywell"
+                
+            # Some threshold was met, but not enough for high confidence
+            logger.info(f"Potential vendor match: {best_vendor} with {match_counts[best_vendor]} indicators (below confidence threshold)")
 
         return "general"  # Default category if no strong matches
 

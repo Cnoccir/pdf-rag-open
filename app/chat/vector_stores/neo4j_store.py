@@ -6,6 +6,7 @@ Provides graph-based storage and retrieval for technical documents.
 
 import os
 import logging
+import json
 import uuid
 import time
 from typing import List, Dict, Any, Optional, Union, Tuple
@@ -190,7 +191,7 @@ class Neo4jVectorStore:
         metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Create a document node in Neo4j.
+        Create a document node in Neo4j with robust handling of complex metadata.
         
         Args:
             pdf_id: Document ID
@@ -202,23 +203,78 @@ class Neo4jVectorStore:
             return
         
         try:
+            # Create a completely clean metadata dictionary with only primitive values
+            clean_metadata = {}
+            
+            if metadata:
+                for key, value in metadata.items():
+                    # Handle different data types appropriately
+                    if key == "document_summary":
+                        # For document_summary, ensure it's a flattened primitive
+                        if isinstance(value, dict):
+                            # Convert dict to JSON string
+                            clean_metadata["document_summary_json"] = json.dumps(value)
+                            # Also store the title directly as a separate property for easier querying
+                            if "title" in value:
+                                clean_metadata["doc_title"] = str(value["title"])
+                        elif isinstance(value, str):
+                            # If already a string (possibly JSON), store as is but with a different key
+                            # to avoid any parsing issues with the original key
+                            clean_metadata["document_summary_json"] = value
+                        else:
+                            # For any other type, convert to string
+                            clean_metadata["document_summary_text"] = str(value)
+                    elif isinstance(value, (str, int, float, bool)):
+                        # Primitive types can be stored directly
+                        clean_metadata[key] = value
+                    elif isinstance(value, list):
+                        # For lists, only store if they contain primitives
+                        if all(isinstance(item, (str, int, float, bool)) for item in value):
+                            clean_metadata[key] = value
+                        else:
+                            # Convert complex lists to JSON
+                            clean_metadata[f"{key}_json"] = json.dumps(value)
+                    elif isinstance(value, dict):
+                        # Convert dictionaries to JSON strings
+                        clean_metadata[f"{key}_json"] = json.dumps(value)
+                    else:
+                        # Convert anything else to string
+                        clean_metadata[key] = str(value)
+            
+            # Log the cleaned metadata for debugging
+            logger.debug(f"Cleaned metadata for Neo4j: {list(clean_metadata.keys())}")
+            
             async with self.driver.session(database=self.database) as session:
-                # Create document node 
+                # Create document node with clean metadata
                 await session.run("""
                     MERGE (d:Document {pdf_id: $pdf_id})
                     ON CREATE SET
-                      d.title = $title,
-                      d.created_at = datetime(),
-                      d.metadata = $metadata
+                    d.title = $title,
+                    d.created_at = datetime()
                     ON MATCH SET
-                      d.title = $title,
-                      d.updated_at = datetime(),
-                      d.metadata = $metadata
+                    d.title = $title,
+                    d.updated_at = datetime()
                 """, {
                     "pdf_id": pdf_id,
-                    "title": title,
-                    "metadata": metadata or {}
+                    "title": title
                 })
+                
+                # Then set each metadata property individually to avoid issues with the entire object
+                if clean_metadata:
+                    for key, value in clean_metadata.items():
+                        try:
+                            # Set each property one by one
+                            await session.run("""
+                                MATCH (d:Document {pdf_id: $pdf_id})
+                                SET d[$key] = $value
+                            """, {
+                                "pdf_id": pdf_id,
+                                "key": key,
+                                "value": value
+                            })
+                        except Exception as prop_error:
+                            # Log but continue if one property fails
+                            logger.warning(f"Failed to set property {key}: {str(prop_error)}")
                 
                 logger.debug(f"Created document node for {pdf_id}")
                 
@@ -1090,7 +1146,7 @@ class Neo4jVectorStore:
     
     async def ingest_processed_content(self, result: Any) -> bool:
         """
-        Ingest processed document content.
+        Ingest processed document content with enhanced error handling and metadata processing.
         
         Args:
             result: ProcessingResult from document processor
@@ -1102,73 +1158,184 @@ class Neo4jVectorStore:
             logger.error("Invalid processing result (missing pdf_id)")
             return False
         
-        logger.info(f"Ingesting processed content for {result.pdf_id}")
+        pdf_id = result.pdf_id
+        logger.info(f"Ingesting processed content for {pdf_id}")
         
         try:
-            # Create document node
+            # First, delete existing content to avoid duplicates (if implementing re-processing)
+            try:
+                existing = await self._check_document_exists(pdf_id)
+                if existing:
+                    logger.info(f"Document {pdf_id} exists, clearing for re-ingestion")
+                    await self.delete_document_content(pdf_id)
+            except Exception as del_err:
+                logger.warning(f"Error checking/clearing existing document: {str(del_err)}")
+            
+            # Extract document title with robust error handling
             title = "Untitled Document"
+            doc_summary_dict = None
+            
+            # Carefully extract document summary
             if hasattr(result, 'document_summary') and result.document_summary:
                 if hasattr(result.document_summary, 'title'):
                     title = result.document_summary.title
+                
+                # Get document summary as a dictionary
+                try:
+                    if hasattr(result.document_summary, 'dict'):
+                        doc_summary_dict = result.document_summary.dict()
+                    elif hasattr(result.document_summary, '__dict__'):
+                        doc_summary_dict = result.document_summary.__dict__
+                    else:
+                        # Try to convert to dict if it's a string that looks like JSON
+                        if isinstance(result.document_summary, str) and result.document_summary.startswith('{'):
+                            try:
+                                doc_summary_dict = json.loads(result.document_summary)
+                            except json.JSONDecodeError:
+                                doc_summary_dict = {"content": result.document_summary}
+                        else:
+                            doc_summary_dict = {"content": str(result.document_summary)}
+                except Exception as dict_err:
+                    logger.warning(f"Error converting document summary to dict: {str(dict_err)}")
+                    doc_summary_dict = {"error": "Could not convert summary"}
             
+            # Prepare clean metadata with primitive values
+            metadata = {
+                "processed_at": datetime.utcnow().isoformat(),
+                "element_count": len(result.elements) if hasattr(result, 'elements') else 0,
+                "chunk_count": len(result.chunks) if hasattr(result, 'chunks') else 0,
+                "domain_category": result._predict_document_category(
+                    result._extract_all_technical_terms(result.elements), 
+                    result.markdown_content
+                ) if hasattr(result, '_predict_document_category') else "general"
+            }
+            
+            # Add document summary separately (don't nest it inside metadata)
+            if doc_summary_dict:
+                # Don't add document_summary directly to metadata
+                # It will be handled properly in create_document_node
+                metadata["document_summary"] = doc_summary_dict
+            
+            # Create document node with the prepared metadata
             await self.create_document_node(
-                pdf_id=result.pdf_id,
+                pdf_id=pdf_id,
                 title=title,
-                metadata={
-                    "processed_at": datetime.utcnow().isoformat(),
-                    "element_count": len(result.elements) if hasattr(result, 'elements') else 0
-                }
+                metadata=metadata
             )
             
-            # Add content elements
-            if hasattr(result, 'elements') and result.elements:
-                for element in result.elements:
-                    await self.add_content_element(element, result.pdf_id)
+            # Add content elements - first batch by type for better performance
+            elements_by_type = {}
+            for element in result.elements:
+                element_type = element.content_type.value if hasattr(element.content_type, 'value') else str(element.content_type)
+                if element_type not in elements_by_type:
+                    elements_by_type[element_type] = []
+                elements_by_type[element_type].append(element)
             
-            # Add concepts and relationships
+            # Process each type in batches
+            for element_type, type_elements in elements_by_type.items():
+                logger.info(f"Processing {len(type_elements)} elements of type {element_type}")
+                
+                # Process in smaller batches to avoid memory issues
+                batch_size = 50
+                for i in range(0, len(type_elements), batch_size):
+                    batch = type_elements[i:i+batch_size]
+                    for element in batch:
+                        try:
+                            await self.add_content_element(element, pdf_id)
+                        except Exception as element_err:
+                            logger.warning(f"Error adding element: {str(element_err)}")
+                    # Log progress for large batches
+                    if i + batch_size < len(type_elements):
+                        logger.info(f"Processed {i + batch_size}/{len(type_elements)} {element_type} elements")
+            
+            # Add concepts and relationships if available
             if hasattr(result, 'concept_network') and result.concept_network:
-                # Add concepts
-                for concept in result.concept_network.concepts:
-                    await self.add_concept(
-                        concept_name=concept.name,
-                        pdf_id=result.pdf_id,
-                        metadata={
-                            "importance": concept.importance_score,
-                            "is_primary": concept.is_primary,
-                            "category": concept.category
-                        }
-                    )
-                
-                # Add relationships
-                for relationship in result.concept_network.relationships:
-                    await self.add_concept_relationship(
-                        source=relationship.source,
-                        target=relationship.target,
-                        rel_type=relationship.type.value if hasattr(relationship.type, 'value') else str(relationship.type),
-                        pdf_id=result.pdf_id,
-                        metadata={
-                            "weight": relationship.weight,
-                            "context": relationship.context
-                        }
-                    )
-                
-                # Add section-concept relationships
-                if hasattr(result.concept_network, 'section_concepts'):
-                    for section, concepts in result.concept_network.section_concepts.items():
-                        for concept in concepts:
-                            await self.add_section_concept_relation(
-                                section=section,
-                                concept=concept,
-                                pdf_id=result.pdf_id
-                            )
+                await self._add_concept_network(result.concept_network, pdf_id)
             
-            logger.info(f"Successfully ingested content for {result.pdf_id}")
+            logger.info(f"Successfully ingested content for {pdf_id}")
             return True
             
         except Exception as e:
-            logger.error(f"Error ingesting processed content: {str(e)}", exc_info=True)
+            logger.error(f"Failed to ingest content: {str(e)}", exc_info=True)
             return False
-    
+            
+    async def _add_concept_network(self, concept_network, pdf_id: str) -> None:
+        """Helper method to add concept network to Neo4j with error handling"""
+        try:
+            # Add concepts with batching
+            concept_batch_size = 100
+            concepts = concept_network.concepts if hasattr(concept_network, 'concepts') else []
+            
+            for i in range(0, len(concepts), concept_batch_size):
+                batch = concepts[i:i+concept_batch_size]
+                for concept in batch:
+                    try:
+                        await self.add_concept(
+                            concept_name=concept.name,
+                            pdf_id=pdf_id,
+                            metadata={
+                                "importance": concept.importance_score if hasattr(concept, 'importance_score') else 0.5,
+                                "is_primary": concept.is_primary if hasattr(concept, 'is_primary') else False,
+                                "category": concept.category if hasattr(concept, 'category') else None
+                            }
+                        )
+                    except Exception as concept_err:
+                        logger.warning(f"Error adding concept {concept.name}: {str(concept_err)}")
+                
+                # Log progress
+                if i + concept_batch_size < len(concepts):
+                    logger.info(f"Processed {i + concept_batch_size}/{len(concepts)} concepts")
+            
+            # Add relationships with batching
+            rel_batch_size = 100
+            relationships = concept_network.relationships if hasattr(concept_network, 'relationships') else []
+            
+            for i in range(0, len(relationships), rel_batch_size):
+                batch = relationships[i:i+rel_batch_size]
+                for rel in batch:
+                    try:
+                        # Extract relationship type safely
+                        rel_type = rel.type
+                        if hasattr(rel_type, 'value'):
+                            rel_type = rel_type.value
+                        
+                        await self.add_concept_relationship(
+                            source=rel.source,
+                            target=rel.target,
+                            rel_type=str(rel_type),
+                            pdf_id=pdf_id,
+                            metadata={
+                                "weight": rel.weight if hasattr(rel, 'weight') else 0.5,
+                                "context": rel.context if hasattr(rel, 'context') else ""
+                            }
+                        )
+                    except Exception as rel_err:
+                        logger.warning(f"Error adding relationship: {str(rel_err)}")
+                
+                # Log progress
+                if i + rel_batch_size < len(relationships):
+                    logger.info(f"Processed {i + rel_batch_size}/{len(relationships)} relationships")
+            
+        except Exception as e:
+            logger.error(f"Error adding concept network: {str(e)}")
+
+    async def _check_document_exists(self, pdf_id: str) -> bool:
+        """Check if document exists in Neo4j"""
+        if not self.initialized:
+            return False
+            
+        try:
+            async with self.driver.session(database=self.database) as session:
+                result = await session.run(
+                    "MATCH (d:Document {pdf_id: $pdf_id}) RETURN count(d) as count",
+                    {"pdf_id": pdf_id}
+                )
+                record = await result.single()
+                return record and record["count"] > 0
+        except Exception as e:
+            logger.warning(f"Error checking document existence: {str(e)}")
+            return False
+
     async def similarity_search(
         self,
         query: str,
