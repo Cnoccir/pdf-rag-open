@@ -121,23 +121,111 @@ class Neo4jVectorStore:
 
     async def initialize_database(self) -> bool:
         """
-        Initialize database schema.
+        Initialize database schema with retry logic.
         Call this method before using the vector store in async contexts.
 
         Returns:
             bool: True if successful, False otherwise
         """
-        if not self.initialized:
-            logger.error("Cannot initialize database - driver not initialized")
-            return False
-
         try:
+            # First ensure we have an active connection
+            connection_success = await self.ensure_connection()
+            if not connection_success:
+                logger.error("Failed to establish Neo4j connection for database initialization")
+                return False
+
+            # Now set up the database schema
+            logger.info("Setting up Neo4j database schema")
             await self._setup_database()
             logger.info("Neo4j database schema initialized successfully")
             return True
         except Exception as e:
             logger.error(f"Failed to initialize Neo4j database schema: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
+
+    async def ensure_connection(self, max_retries=3, retry_delay=2.0) -> bool:
+        """
+        Ensure Neo4j connection is active with retry logic.
+
+        Args:
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+
+        Returns:
+            bool: True if connection successful, False otherwise
+        """
+        # First check if we're already initialized and connected
+        if self.initialized and self.driver:
+            try:
+                # Test connection with a simple query
+                async with self.driver.session(database=self.database) as session:
+                    result = await session.run("RETURN 1 as test")
+                    record = await result.single()
+                    if record and record["test"] == 1:
+                        logger.debug("Neo4j connection is already active")
+                        return True
+            except Exception as e:
+                logger.warning(f"Existing Neo4j connection failed: {str(e)}")
+                # Reset initialized state since the connection failed
+                self.initialized = False
+                self.driver = None
+
+        # Try to (re)initialize with retries
+        retries = 0
+        last_error = None
+
+        while retries < max_retries:
+            try:
+                logger.info(f"Attempting Neo4j connection (attempt {retries+1}/{max_retries})")
+
+                # Create Neo4j driver
+                self.driver = AsyncGraphDatabase.driver(
+                    self.url,
+                    auth=(self.username, self.password),
+                    max_connection_lifetime=3600  # 1 hour max connection lifetime
+                )
+
+                # Initialize embeddings
+                self.embeddings = OpenAIEmbeddings(
+                    model=self.embedding_model,
+                    openai_api_key=os.getenv("OPENAI_API_KEY")
+                )
+
+                # Test the connection
+                async with self.driver.session(database=self.database) as session:
+                    result = await session.run("RETURN 1 as test")
+                    record = await result.single()
+
+                    if record and record["test"] == 1:
+                        self.initialized = True
+                        logger.info(f"Neo4j connection established successfully on attempt {retries+1}")
+
+                        # Initialize database schema
+                        await self._setup_database()
+                        return True
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Neo4j connection attempt {retries+1} failed: {str(e)}")
+
+                # Close driver if it was created
+                if self.driver:
+                    await self.driver.close()
+                    self.driver = None
+
+                self.initialized = False
+
+            # Increment retry counter and wait before next attempt
+            retries += 1
+            if retries < max_retries:
+                delay = retry_delay * (1.5 ** retries)  # Exponential backoff
+                logger.info(f"Waiting {delay:.1f}s before next connection attempt")
+                await asyncio.sleep(delay)
+
+        # All retries failed
+        if last_error:
+            logger.error(f"All Neo4j connection attempts failed: {str(last_error)}")
+        return False
 
     async def _setup_database(self) -> None:
         """Set up Neo4j database with necessary indexes and constraints."""
@@ -1550,3 +1638,84 @@ class Neo4jVectorStore:
         loop.run_until_complete(add_all_texts())
 
         return result_ids
+
+    async def check_health(self) -> Dict[str, Any]:
+        """
+        Check the health status of the Neo4j connection and database.
+
+        Returns:
+            Dict with status information
+        """
+        health_info = {
+            "status": "unknown",
+            "connection": False,
+            "database_ready": False,
+            "indexes": [],
+            "vector_indexes": [],
+            "node_counts": {},
+            "last_error": None,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        if not self.initialized:
+            health_info["status"] = "not_initialized"
+            return health_info
+
+        try:
+            # Try to establish connection if needed
+            connection_result = await self.ensure_connection(max_retries=1)
+            health_info["connection"] = connection_result
+
+            if not connection_result:
+                health_info["status"] = "connection_failed"
+                return health_info
+
+            # Check database schema
+            async with self.driver.session(database=self.database) as session:
+                # Check indexes
+                result = await session.run("SHOW INDEXES")
+                indexes = []
+                async for record in result:
+                    index_info = {
+                        "name": record.get("name", "unknown"),
+                        "type": record.get("type", "unknown"),
+                        "uniqueness": record.get("uniqueness", "unknown"),
+                        "state": record.get("state", "unknown")
+                    }
+                    indexes.append(index_info)
+
+                    # Track vector indexes separately
+                    if "vector" in record.get("type", "").lower():
+                        health_info["vector_indexes"].append(index_info)
+
+                health_info["indexes"] = indexes
+                health_info["database_ready"] = any(idx["name"] == "content_vector" for idx in indexes)
+
+                # Count nodes by label
+                result = await session.run("""
+                    MATCH (n)
+                    WITH labels(n) AS labels, count(n) AS count
+                    RETURN labels, count
+                    ORDER BY count DESC
+                """)
+
+                counts = {}
+                async for record in result:
+                    label = ":".join(record["labels"]) or "no_label"
+                    counts[label] = record["count"]
+
+                health_info["node_counts"] = counts
+
+                # Set overall status
+                if health_info["database_ready"]:
+                    health_info["status"] = "ready"
+                else:
+                    health_info["status"] = "schema_incomplete"
+
+                return health_info
+
+        except Exception as e:
+            health_info["status"] = "error"
+            health_info["last_error"] = str(e)
+            logger.error(f"Error checking Neo4j health: {str(e)}")
+            return health_info

@@ -1,18 +1,15 @@
 import axios from 'axios';
 import { addError } from '$s/errors';
 
-interface ApiError {
-	message: string;
-	error: string;
-}
-
+// Create consistent axios instance with proper error handling
 export const api = axios.create({
-	baseURL: '/api'
+  baseURL: '/api'  // Keep as is, this is correct
 });
 
+// Enhanced request logging
 api.interceptors.request.use(
   (config) => {
-    console.log(`[API Request] ${config.method.toUpperCase()} ${config.url}`, config.data || '');
+    console.log(`[API Request] ${config.method?.toUpperCase()} ${config.url}`, config.data || '');
     return config;
   },
   (error) => {
@@ -20,29 +17,24 @@ api.interceptors.request.use(
     return Promise.reject(error);
   }
 );
-
-// Enhance response interceptor
+// Enhanced response logging with detailed error handling
 api.interceptors.response.use(
   (response) => {
-    console.log(`[API Response] ${response.status} from ${response.config.url}`,
-                response.data || '');
+    console.log(`[API Response] ${response.status} from ${response.config.url}`, response.data || '');
     return response;
   },
   (err) => {
+    // Extract useful error details
     if (err.response) {
       const { status, data, config } = err.response;
       console.error(`[API Error] ${status} from ${config.url}`, data || err.message);
 
+      // Handle server errors by adding to error store
       if (status >= 500) {
-        const { response } = err;
-        const message = getErrorMessage(err);
-
-        if (message) {
-          addError({
-            contentType: response.headers['Content-Type'] || response.headers['content-type'],
-            message: getErrorMessage(err)
-          });
-        }
+        addError({
+          contentType: err.response.headers['Content-Type'] || err.response.headers['content-type'],
+          message: getErrorMessage(err)
+        });
       }
     } else if (err.request) {
       console.error('[API Network Error] No response received', err.request);
@@ -79,29 +71,32 @@ export const deletePdf = async (pdfId: string) => {
   }
 };
 
-export const getErrorMessage = (error: unknown) => {
-	if (axios.isAxiosError(error)) {
-		const apiError = error.response?.data as ApiError;
-		if (typeof apiError === 'string' && (apiError as string).length > 0) {
-			return apiError;
-		}
-		return apiError?.message || apiError?.error || error.message;
-	}
+// Improved error message extraction
+export const getErrorMessage = (error: unknown): string => {
+  if (axios.isAxiosError(error)) {
+    const apiError = error.response?.data;
 
-	if (error instanceof Error) {
-		return error.message;
-	}
+    // Handle string errors
+    if (typeof apiError === 'string' && apiError.length > 0) {
+      return apiError;
+    }
 
-	if (
-		error &&
-		typeof error === 'object' &&
-		'message' in error &&
-		typeof error.message === 'string'
-	) {
-		return error.message;
-	}
+    // Handle object errors
+    if (apiError && typeof apiError === 'object') {
+      return apiError.message || apiError.error || error.message;
+    }
 
-	return 'Something went wrong';
+    // Fallback to status text or axios message
+    return error.response?.statusText || error.message;
+  }
+
+  // Handle non-axios errors
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  // Handle unknown error types
+  return 'Unknown error occurred. Please try again.';
 };
 
 export const getError = (error: unknown) => {

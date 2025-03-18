@@ -111,6 +111,9 @@ def register_blueprints(app):
     app.register_blueprint(conversation_views.bp)
     app.register_blueprint(client_views.bp)
 
+    from app.web.views import health_views
+    app.register_blueprint(health_views.bp)    
+
     # Stream views are no longer needed as we handle streaming in conversation_views
     # But keep it registered for backward compatibility
     try:

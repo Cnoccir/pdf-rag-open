@@ -2,77 +2,12 @@ import { get } from 'svelte/store';
 import { writable } from '../writeable';
 import { api } from '$api';
 
-export interface Message {
-	id?: number;
-	role: 'user' | 'assistant' | 'system' | 'pending';
-	content: string;
-	metadata?: any; // Include metadata for research mode info
-}
-
-export interface Conversation {
-	id: number;
-	messages: Message[];
-	pdf_id?: number; // Document ID
-	metadata?: {
-		research_mode?: {
-			active: boolean;
-			pdf_ids: string[];
-			document_names?: Record<string, string>;
-		}
-	};
-}
-
-// Document interfaces for research mode
-export interface DocumentInfo {
-	id: string;
-	name: string;
-	concepts?: string[];
-	confidence?: number;
-	isPrimary?: boolean;
-}
-
-export interface MessageOpts {
-	useStreaming?: boolean;
-	useResearch?: boolean;
-	documentId?: string;
-	activeDocs?: string[]; // Add active document IDs
-}
-
-export interface ChatState {
-	error: string;
-	loading: boolean;
-	activeConversationId: number | null;
-	conversations: Conversation[];
-	// Research mode fields
-	researchMode: boolean;
-	recommendedDocuments: DocumentInfo[];
-	activeDocuments: DocumentInfo[];
-	availableDocuments: DocumentInfo[];
-	// Add this new field to track failed messages
-	lastMessageFailed: boolean;
-}
-
-const INITIAL_STATE: ChatState = {
-	error: '',
-	loading: false,
-	activeConversationId: null,
-	conversations: [],
-	// Research mode initial state
-	researchMode: false,
-	recommendedDocuments: [],
-	activeDocuments: [],
-	availableDocuments: [],
-	// Initialize lastMessageFailed
-	lastMessageFailed: false
-};
-
-// Add DEBUG flag
+// Enable for debugging
 const DEBUG = true;
 
-// Define the logDebug function
+// Helper logging function
 const logDebug = (message: string, data: any = null) => {
   if (!DEBUG) return;
-
   if (data) {
     console.log(`[Chat Debug] ${message}:`, data);
   } else {
@@ -80,66 +15,162 @@ const logDebug = (message: string, data: any = null) => {
   }
 };
 
+// Type definitions for conversation and messages
+export interface Message {
+  id?: string | number;
+  role: 'user' | 'assistant' | 'system' | 'pending';
+  content: string;
+  metadata?: any;
+  created_at?: string;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  pdf_id?: string;
+  messages: Message[];
+  metadata?: {
+    research_mode?: {
+      active: boolean;
+      pdf_ids: string[];
+      document_names?: Record<string, string>;
+    };
+    [key: string]: any;
+  };
+  last_updated?: string;
+  message_count?: number;
+}
+
+// Document interfaces for research mode
+export interface DocumentInfo {
+  id: string;
+  name: string;
+  concepts?: string[];
+  confidence?: number;
+  isPrimary?: boolean;
+}
+
+export interface MessageOpts {
+  useStreaming?: boolean;
+  useResearch?: boolean;
+  documentId?: string;
+  activeDocs?: string[];
+}
+
+// Main chat state interface
+export interface ChatState {
+  error: string;
+  loading: boolean;
+  activeConversationId: string | null;
+  conversations: Conversation[];
+  // Research mode fields
+  researchMode: boolean;
+  recommendedDocuments: DocumentInfo[];
+  activeDocuments: DocumentInfo[];
+  availableDocuments: DocumentInfo[];
+  lastMessageFailed: boolean;
+  streamInProgress: boolean;
+}
+
+// Initial state
+const INITIAL_STATE: ChatState = {
+  error: '',
+  loading: false,
+  activeConversationId: null,
+  conversations: [],
+  // Research mode initial state
+  researchMode: false,
+  recommendedDocuments: [],
+  activeDocuments: [],
+  availableDocuments: [],
+  lastMessageFailed: false,
+  streamInProgress: false
+};
+
+// Create store
 const store = writable<ChatState>(INITIAL_STATE);
 
+// Helper to update state
 const set = (val: Partial<ChatState>) => {
-	store.update((state) => ({ ...state, ...val }));
+  store.update((state) => ({ ...state, ...val }));
 };
 
+// Get active conversation
+const getActiveConversation = (): Conversation | null => {
+  const { conversations, activeConversationId } = get(store);
+  if (!activeConversationId) {
+    return null;
+  }
+
+  return conversations.find((c) => c.id === activeConversationId) || null;
+};
+
+// Get raw messages (for API requests)
 const getRawMessages = () => {
-	const conversation = getActiveConversation();
-	if (!conversation) {
-		return [];
-	}
+  const conversation = getActiveConversation();
+  if (!conversation) {
+    return [];
+  }
 
-	return conversation.messages
-		.filter((message) => message.role !== 'pending')
-		.map((message) => {
-			return { role: message.role, content: message.content };
-		});
+  return conversation.messages
+    .filter((message) => message.role !== 'pending')
+    .map((message) => {
+      return { role: message.role, content: message.content };
+    });
 };
 
-const getActiveConversation = () => {
-	const { conversations, activeConversationId } = get(store);
-	if (!activeConversationId) {
-		return null;
-	}
-
-	return conversations.find((c) => c.id === activeConversationId);
-};
-
+// Insert message to active conversation
 const insertMessageToActive = (message: Message) => {
-	store.update((s) => {
-		const conv = s.conversations.find((c) => c.id === s.activeConversationId);
-		if (!conv) {
-			return s;
-		}
-		conv.messages.push(message);
-		return s;
-	});
+  store.update((s) => {
+    const conv = s.conversations.find((c) => c.id === s.activeConversationId);
+    if (!conv) {
+      return s;
+    }
+
+    // Ensure messages array is initialized
+    if (!Array.isArray(conv.messages)) {
+      conv.messages = [];
+    }
+
+    conv.messages.push(message);
+    return s;
+  });
 };
 
-const removeMessageFromActive = (id: number) => {
-	store.update((s) => {
-		const conv = s.conversations.find((c) => c.id === s.activeConversationId);
-		if (!conv) {
-			return s;
-		}
-		conv.messages = conv.messages.filter((m) => m.id != id);
-		return s;
-	});
+// Remove message from active conversation
+const removeMessageFromActive = (id: string | number) => {
+  store.update((s) => {
+    const conv = s.conversations.find((c) => c.id === s.activeConversationId);
+    if (!conv) {
+      return s;
+    }
+
+    // Ensure messages array is initialized
+    if (!Array.isArray(conv.messages)) {
+      conv.messages = [];
+      return s;
+    }
+
+    conv.messages = conv.messages.filter((m) => m.id !== id);
+    return s;
+  });
 };
 
+// Add conversation scoring
 const scoreConversation = async (score: number) => {
-	const conversationId = get(store).activeConversationId;
+  const conversationId = get(store).activeConversationId;
+  if (!conversationId) return;
 
-	return api.post(`/scores?conversation_id=${conversationId}`, { score });
+  try {
+    await api.post(`/scores?conversation_id=${conversationId}`, { score });
+    return true;
+  } catch (error) {
+    console.error("Error scoring conversation:", error);
+    return false;
+  }
 };
 
-/**
- * Extract recommended documents from the latest assistant message
- * to show document recommendations to the user
- */
+// Extract recommended documents from the latest assistant message
 const extractRecommendedDocuments = () => {
   const conversation = getActiveConversation();
   if (!conversation) return;
@@ -162,18 +193,25 @@ const extractRecommendedDocuments = () => {
   }
 };
 
-const fetchConversations = async (documentId: number) => {
+// Fetch conversations for a document
+const fetchConversations = async (documentId: string) => {
   set({ loading: true, error: '', lastMessageFailed: false });
 
   try {
-    // Using path parameter instead of query parameter to match server route
     logDebug(`Fetching conversations for document: ${documentId}`);
     const { data } = await api.get(`/conversations/${documentId}`);
     logDebug("Conversation API response:", data);
 
-    // Extract conversations from response object - server returns {conversations: [...]}
+    // Extract conversations from response
     const processedConversations = data.conversations || [];
     logDebug(`Received ${processedConversations.length} conversations`);
+
+    // Ensure each conversation has initialized messages array
+    processedConversations.forEach(conv => {
+      if (!Array.isArray(conv.messages)) {
+        conv.messages = [];
+      }
+    });
 
     if (processedConversations.length) {
       set({
@@ -187,6 +225,8 @@ const fetchConversations = async (documentId: number) => {
     } else {
       await createConversation(documentId);
     }
+
+    return processedConversations;
   } catch (error) {
     console.error("Error fetching conversations:", error);
     set({
@@ -194,34 +234,44 @@ const fetchConversations = async (documentId: number) => {
       loading: false,
       lastMessageFailed: true
     });
+
+    return [];
   }
 }
 
-const createConversation = async (documentId: number) => {
+// Create new conversation
+const createConversation = async (documentId: string) => {
   set({ loading: true, error: '', lastMessageFailed: false });
 
   try {
-    // Using path parameter instead of query parameter to match server route
     logDebug(`Creating conversation for document: ${documentId}`);
     const { data } = await api.post(`/conversations/${documentId}`);
     logDebug("Create conversation API response:", data);
 
-    // Make sure we have a valid response before setting state
-    if (data && data.id) {
-      set({
-        activeConversationId: data.id,
-        conversations: [data, ...get(store).conversations],
-        loading: false,
-        // Reset research mode for new conversation
-        researchMode: false,
-        recommendedDocuments: [],
-        activeDocuments: []
-      });
-
-      return data;
-    } else {
-      throw new Error("Invalid response data from server");
+    // Ensure data has required structure
+    if (!data || !data.id) {
+      throw new Error("Invalid response from server");
     }
+
+    // Ensure messages array is initialized
+    if (!Array.isArray(data.messages)) {
+      data.messages = [];
+    }
+
+    // Add to conversations list
+    const currentConversations = get(store).conversations;
+
+    set({
+      activeConversationId: data.id,
+      conversations: [data, ...currentConversations],
+      loading: false,
+      // Reset research mode for new conversation
+      researchMode: false,
+      recommendedDocuments: [],
+      activeDocuments: []
+    });
+
+    return data;
   } catch (error) {
     console.error("Error creating conversation:", error);
     set({
@@ -229,17 +279,20 @@ const createConversation = async (documentId: number) => {
       loading: false,
       lastMessageFailed: true
     });
+
     return null;
   }
 }
 
-const setActiveConversationId = (id: number) => {
-	set({ activeConversationId: id, lastMessageFailed: false });
+// Set active conversation ID
+const setActiveConversationId = (id: string) => {
+  set({ activeConversationId: id, lastMessageFailed: false, error: '' });
 
-	// Update research mode state based on the newly selected conversation
-	updateResearchModeFromActiveConversation();
+  // Update research mode state based on the newly selected conversation
+  updateResearchModeFromActiveConversation();
 };
 
+// Update research mode from active conversation metadata
 const updateResearchModeFromActiveConversation = () => {
   const conversation = getActiveConversation();
   if (!conversation) {
@@ -254,7 +307,7 @@ const updateResearchModeFromActiveConversation = () => {
     const researchMode = conversation.metadata.research_mode;
     logDebug("Found research mode metadata:", researchMode);
 
-    // CRITICAL FIX: Ensure we check both active flag AND multiple PDFs
+    // Check both active flag AND multiple PDFs
     let isResearchActive = false;
 
     if (researchMode.active === true && researchMode.pdf_ids && researchMode.pdf_ids.length > 1) {
@@ -297,7 +350,7 @@ const updateResearchModeFromActiveConversation = () => {
   }
 };
 
-// Add sendMessage function
+// Send a message
 const sendMessage = async (text: string, opts: MessageOpts = {}) => {
   const conversationId = get(store).activeConversationId;
   logDebug(`Sending message to conversation ${conversationId}, text: "${text.substring(0, 30)}..."`);
@@ -321,129 +374,258 @@ const sendMessage = async (text: string, opts: MessageOpts = {}) => {
 
   logDebug(`Research mode: ${isResearchActive}, active docs:`, activeDocuments);
 
+  // Decide between streaming and non-streaming
+  const useStreaming = opts.useStreaming !== undefined ? opts.useStreaming : true;
+
+  if (useStreaming) {
+    // Use streaming API
+    return streamMessage(text, conversationId, isResearchActive, activeDocuments);
+  } else {
+    // Use regular API
+    return sendNonStreamingMessage(text, conversationId, isResearchActive, activeDocuments);
+  }
+};
+
+// Send a message with streaming
+const streamMessage = async (text: string, conversationId: string, isResearchActive: boolean, activeDocuments: string[]) => {
   // Add user message and pending message immediately for better UX
-  const userMessage = {
+  const userMessage: Message = {
+    id: Date.now(),
     role: 'user',
     content: text
   };
 
-  const pendingMessage = {
+  const pendingMessage: Message = {
+    id: Date.now() + 1,
     role: 'pending',
     content: ''
   };
 
+  // Update store
   store.update(s => {
     const conversation = s.conversations.find(c => c.id === conversationId);
     if (conversation) {
-      conversation.messages = [...conversation.messages, userMessage, pendingMessage];
+      if (!Array.isArray(conversation.messages)) {
+        conversation.messages = [];
+      }
+      conversation.messages.push(userMessage, pendingMessage);
     }
-    return s;
+    return {
+      ...s,
+      streamInProgress: true
+    };
   });
 
   try {
-    // FIX: Make sure we pass the correct parameters
-    const response = await api.post(`/conversations/${conversationId}/messages`, {
-      input: text,
-      message: text, // Include for backward compatibility
-      useStreaming: opts.useStreaming || false,
-      useResearch: isResearchActive,
-      activeDocs: activeDocuments
+    // Use fetch for streaming support
+    const response = await fetch(`/api/conversations/${conversationId}/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        input: text,
+        message: text, // For backwards compatibility
+        useStreaming: true,
+        useResearch: isResearchActive,
+        activeDocs: activeDocuments
+      })
     });
 
-    logDebug("Message response:", response.data);
-
-    // Remove pending message
-    store.update(s => {
-      const conversation = s.conversations.find(c => c.id === conversationId);
-      if (conversation) {
-        conversation.messages = conversation.messages.filter(m => m.role !== 'pending');
-      }
-      return s;
-    });
-
-    // Process the response and update the conversation
-    if (response.data) {
-      // Extract the actual messages from the response
-      const apiUserMessage = response.data.message || {
-        role: 'user',
-        content: text
-      };
-
-      const assistantMessage = response.data.response ? {
-        role: 'assistant',
-        content: response.data.response,
-        metadata: response.data.metadata || {}
-      } : response.data;
-
-      // Add the messages to the conversation
-      store.update(s => {
-        const conversation = s.conversations.find(c => c.id === conversationId);
-        if (conversation) {
-          // Add user message if it's not included
-          if (!conversation.messages.some(m => m.role === 'user' && m.content === text)) {
-            conversation.messages.push(apiUserMessage);
-          }
-
-          // Add assistant message
-          conversation.messages.push(assistantMessage);
-
-          // Update research mode status if available
-          if (response.data.research_mode || assistantMessage.metadata?.research_mode) {
-            const researchMode = response.data.research_mode || assistantMessage.metadata?.research_mode;
-            conversation.metadata = {
-              ...conversation.metadata,
-              research_mode: researchMode
-            };
-
-            logDebug("Updated research mode in conversation metadata:", researchMode);
-          }
-        }
-        return s;
-      });
-
-      // Update application state based on the response
-      updateResearchModeFromActiveConversation();
-
-      set({ loading: false, lastMessageFailed: false });
-      return response.data;
-    } else {
-      throw new Error("Invalid response from server");
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || `Server error: ${response.status}`);
     }
-  } catch (error) {
-    const errorMessage = error.response?.data?.error || error.message || 'Failed to send message';
-    logDebug(`Error sending message: ${errorMessage}`, error);
 
-    // Remove pending message on error
+    // Get reader for the stream
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error("Stream not available");
+    }
+
+    let accumulatedText = '';
+    let citationsData = [];
+    let decoder = new TextDecoder();
+
+    // Remove pending message and replace with actual assistant message
+    store.update(s => {
+      const conversation = s.conversations.find(c => c.id === conversationId);
+      if (conversation) {
+        conversation.messages = conversation.messages.filter(m => m.role !== 'pending');
+        conversation.messages.push({
+          id: Date.now() + 2,
+          role: 'assistant',
+          content: ''
+        });
+      }
+      return s;
+    });
+
+    // Read the stream
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      // Decode the chunk
+      const chunk = decoder.decode(value);
+
+      // Process multiple JSON objects that might be in the same chunk
+      const lines = chunk.split('\n').filter(line => line.trim());
+
+      for (const line of lines) {
+        try {
+          const data = JSON.parse(line);
+
+          if (data.type === 'status' && data.status === 'processing') {
+            // Status update, do nothing yet
+            continue;
+          }
+
+          if (data.type === 'error') {
+            throw new Error(data.error || 'Unknown error in stream');
+          }
+
+          if (data.type === 'stream' && data.chunk) {
+            // Append to accumulated text
+            accumulatedText += data.chunk;
+
+            // Update the message in real-time
+            store.update(s => {
+              const conversation = s.conversations.find(c => c.id === conversationId);
+              if (conversation) {
+                const assistantMsgIndex = conversation.messages.findIndex(m => m.role === 'assistant');
+                if (assistantMsgIndex >= 0) {
+                  conversation.messages[assistantMsgIndex].content = accumulatedText;
+                }
+              }
+              return s;
+            });
+          }
+
+          if (data.type === 'end') {
+            // Final message with complete response
+            accumulatedText = data.message || accumulatedText;
+            citationsData = data.citations || [];
+
+            // Update the final message with complete content and metadata
+            store.update(s => {
+              const conversation = s.conversations.find(c => c.id === conversationId);
+              if (conversation) {
+                const assistantMsgIndex = conversation.messages.findIndex(m => m.role === 'assistant');
+                if (assistantMsgIndex >= 0) {
+                  conversation.messages[assistantMsgIndex].content = accumulatedText;
+                  conversation.messages[assistantMsgIndex].metadata = {
+                    citations: citationsData
+                  };
+                }
+              }
+              return {
+                ...s,
+                loading: false,
+                streamInProgress: false,
+                lastMessageFailed: false
+              };
+            });
+
+            // Update research mode state after receiving response
+            updateResearchModeFromActiveConversation();
+
+            return {
+              content: accumulatedText,
+              citations: citationsData
+            };
+          }
+        } catch (jsonError) {
+          console.error("Error parsing JSON from stream:", jsonError);
+          // Continue to next line
+        }
+      }
+    }
+
+    // Ensure loading is set to false even if no 'end' message
+    set({ loading: false, streamInProgress: false });
+    return {
+      content: accumulatedText,
+      citations: citationsData
+    };
+  } catch (error) {
+    console.error("Error in streaming message:", error);
+
+    // Remove pending message if still present
     store.update(s => {
       const conversation = s.conversations.find(c => c.id === conversationId);
       if (conversation) {
         conversation.messages = conversation.messages.filter(m => m.role !== 'pending');
       }
-      return s;
-    });
-
-    set({
-      error: errorMessage,
-      loading: false,
-      lastMessageFailed: true
+      return {
+        ...s,
+        error: error.message || 'Failed to send message',
+        loading: false,
+        streamInProgress: false,
+        lastMessageFailed: true
+      };
     });
 
     return null;
   }
 };
 
-/**
- * Regenerate the response for a previously failed query with improved research mode handling
- * @param query The original query to regenerate a response for
- * @param options Options for message sending
- * @returns A Promise that resolves when the regeneration is complete
- */
+// Send a message without streaming
+const sendNonStreamingMessage = async (text: string, conversationId: string, isResearchActive: boolean, activeDocuments: string[]) => {
+  // Add user message immediately for better UX
+  const userMessage: Message = {
+    id: Date.now(),
+    role: 'user',
+    content: text
+  };
+
+  insertMessageToActive(userMessage);
+
+  try {
+    const response = await api.post(`/conversations/${conversationId}/messages`, {
+      input: text,
+      message: text, // For backwards compatibility
+      useStreaming: false,
+      useResearch: isResearchActive,
+      activeDocs: activeDocuments
+    });
+
+    // Add the response from the API
+    if (response.data && response.data.response) {
+      const assistantMessage: Message = {
+        id: Date.now() + 1,
+        role: 'assistant',
+        content: response.data.response,
+        metadata: {
+          citations: response.data.citations || []
+        }
+      };
+
+      insertMessageToActive(assistantMessage);
+    }
+
+    // Update research mode state after receiving response
+    updateResearchModeFromActiveConversation();
+
+    set({ loading: false, lastMessageFailed: false });
+    return response.data;
+  } catch (error) {
+    console.error("Error sending message:", error);
+    set({
+      error: error.response?.data?.error || error.message || 'Failed to send message',
+      loading: false,
+      lastMessageFailed: true
+    });
+    return null;
+  }
+};
+
+// Regenerate the response for a previously failed query
 const regenerateResponse = async (query: string, options: MessageOpts = {}) => {
   const currentState = get(store);
   const conversationId = currentState.activeConversationId;
 
   if (!conversationId) {
-    console.error("No active conversation found");
     set({
       error: 'No active conversation. Please start a new chat or select an existing conversation.',
       loading: false,
@@ -455,7 +637,7 @@ const regenerateResponse = async (query: string, options: MessageOpts = {}) => {
   set({ loading: true, error: '', lastMessageFailed: false });
 
   try {
-    // Capture current research mode state before sending message
+    // Capture current research mode state
     const isResearchActive = currentState.researchMode;
     const activeDocuments = currentState.activeDocuments.map((doc) => doc.id);
 
@@ -463,103 +645,8 @@ const regenerateResponse = async (query: string, options: MessageOpts = {}) => {
       `Regenerating response with research mode: ${isResearchActive}, docs: ${activeDocuments.length}`
     );
 
-    // Explicitly set research mode options
-    options.useResearch = isResearchActive;
-    options.activeDocs = activeDocuments;
-
-    // Use the existing API endpoint with regeneration header
-    const response = await api.post(
-      `/conversations/${conversationId}/messages`,
-      {
-        input: query,
-        useStreaming: options.useStreaming || false,
-        useResearch: isResearchActive, // Use current state
-        activeDocs: activeDocuments, // Send active doc IDs
-      },
-      { headers: { 'X-Regeneration-Request': 'true' } }
-    );
-
-    // Response should contain both user message and AI response
-    const { message, response: assistantMessage } = response.data;
-
-    if (!message || !assistantMessage) {
-      throw new Error('Invalid response from server');
-    }
-
-    // Update the conversation - for regeneration, replace existing messages
-    store.update((s) => {
-      const conversation = s.conversations.find((c) => c.id === conversationId);
-      if (!conversation) return s;
-
-      // Remove pending or error messages
-      conversation.messages = conversation.messages.filter(
-        (m) =>
-          m.role !== 'pending' &&
-          !(m.role === 'assistant' && m.metadata?.status === 'error')
-      );
-
-      // Update conversation metadata if needed
-      if (assistantMessage.metadata && assistantMessage.metadata.research_mode) {
-        conversation.metadata = {
-          ...conversation.metadata,
-          research_mode: assistantMessage.metadata.research_mode,
-        };
-
-        console.log(
-          "Updated research mode in metadata during regeneration:",
-          assistantMessage.metadata.research_mode
-        );
-      }
-
-      // Add the new response
-      conversation.messages.push(assistantMessage);
-
-      return s;
-    });
-
-    // Update research mode status based on assistant response
-    if (assistantMessage.metadata) {
-      // Extract recommended documents
-      const recommendedDocs = assistantMessage.metadata.recommended_documents || [];
-
-      // Extract active documents from research mode
-      let updatedActiveDocs: DocumentInfo[] = [];
-      let updatedResearchActive = false;
-
-      if (assistantMessage.metadata.research_mode) {
-        const researchMode = assistantMessage.metadata.research_mode;
-
-        // Validate research mode properly
-        updatedResearchActive =
-          researchMode.active === true &&
-          researchMode.pdf_ids &&
-          researchMode.pdf_ids.length > 1;
-
-        if (updatedResearchActive && researchMode.pdf_ids && researchMode.document_names) {
-          updatedActiveDocs = researchMode.pdf_ids.map((id) => ({
-            id,
-            name: researchMode.document_names[id] || `Document ${id}`,
-            isPrimary: id === String(message.conversation_id),
-          }));
-        }
-      }
-
-      set({
-        recommendedDocuments: recommendedDocs,
-        activeDocuments: updatedActiveDocs,
-        researchMode: updatedResearchActive,
-        loading: false,
-        lastMessageFailed: false,
-      });
-
-      console.log(
-        `Updated UI state after regeneration: research_mode=${updatedResearchActive}, active_docs=${updatedActiveDocs.length}`
-      );
-    } else {
-      set({ loading: false, lastMessageFailed: false });
-    }
-
-    return { message, assistantMessage };
+    // Use the streaming approach for better UX
+    return await streamMessage(query, conversationId, isResearchActive, activeDocuments);
   } catch (error) {
     console.error('Failed to regenerate response:', error);
 
@@ -573,7 +660,7 @@ const regenerateResponse = async (query: string, options: MessageOpts = {}) => {
   }
 };
 
-
+// Activate research mode
 const activateResearchMode = async (conversationId: number, pdfIds: string[]) => {
   set({ loading: true, error: '', lastMessageFailed: false });
 
@@ -604,11 +691,9 @@ const activateResearchMode = async (conversationId: number, pdfIds: string[]) =>
 
     logDebug("Enhanced documents for research:", documentsWithNames);
 
-    // CRITICAL FIX: Use the correct API endpoint
-    // The server has a route at /conversations/<conversation_id>/research, NOT /research/activate
-    const response = await api.post(`/conversations/${conversationId}/research`, {
-      pdf_ids: formattedPdfIds,
-      active: true  // Explicitly set active flag
+    // FIXED: Use the correct API endpoint
+    const response = await api.post(`/api/conversations/${conversationId}/research/activate`, {
+      pdf_ids: formattedPdfIds
     });
 
     // Update store with properly named documents
@@ -654,8 +739,8 @@ const deactivateResearchMode = async (conversationId: number) => {
   set({ loading: true, error: '', lastMessageFailed: false });
 
   try {
-    // FIX: Use the correct API endpoint for toggling research mode
-    const response = await api.post(`/conversations/${conversationId}/research`, {
+    // FIXED: Use the correct API endpoint for toggling research mode
+    const response = await api.post(`/api/conversations/${conversationId}/research/deactivate`, {
       active: false  // Explicitly set active flag to false
     });
 
@@ -699,7 +784,7 @@ const deactivateResearchMode = async (conversationId: number) => {
   }
 };
 
-// Updated acceptRecommendedDocument function with improved research mode handling
+// Accept a recommended document
 const acceptRecommendedDocument = async (documentId: string) => {
   const state = get(store);
   const conversationId = state.activeConversationId;
@@ -730,7 +815,7 @@ const acceptRecommendedDocument = async (documentId: string) => {
   return success;
 };
 
-// New function to fetch available documents
+// Fetch available documents
 const fetchAvailableDocuments = async () => {
   try {
     const { data } = await api.get('/pdfs/');
@@ -752,7 +837,7 @@ const fetchAvailableDocuments = async () => {
   }
 };
 
-// Add deleteDocument function since it's exported in index.ts
+// Delete a document
 const deleteDocument = async (documentId: string) => {
   try {
     await api.delete(`/pdfs/${documentId}`);
@@ -775,13 +860,13 @@ const deleteDocument = async (documentId: string) => {
   }
 };
 
-// Helper function to fetch document names
+// Fetch document names
 const fetchDocumentNames = async (pdfIds: string[]): Promise<DocumentInfo[]> => {
   try {
     // First, try to get names from existing documents in the store
     const existingDocs = get(store).availableDocuments;
     const cachedConversation = getActiveConversation();
-    const primaryPdf = cachedConversation?.pdf;
+    const primaryPdf = cachedConversation?.pdf_id;
 
     logDebug("Fetching document names for:", pdfIds);
     logDebug("Primary PDF:", primaryPdf);
@@ -791,10 +876,10 @@ const fetchDocumentNames = async (pdfIds: string[]): Promise<DocumentInfo[]> => 
     if (existingDocs.length > 0) {
       return pdfIds.map(id => {
         // Check if this is the primary document from conversation
-        if (primaryPdf && String(primaryPdf.id) === String(id)) {
+        if (primaryPdf && String(primaryPdf) === String(id)) {
           return {
             id: id.toString(),
-            name: primaryPdf.name || `Document ${id}`,
+            name: existingDocs.find(d => String(d.id) === String(id))?.name || `Document ${id}`,
             isPrimary: true
           };
         }
@@ -815,17 +900,28 @@ const fetchDocumentNames = async (pdfIds: string[]): Promise<DocumentInfo[]> => 
       try {
         const { data } = await api.get(`/pdfs/${id}`);
         logDebug(`Fetched document ${id}:`, data);
+
+        // Handle different response formats
+        let name;
+        if (data.pdf) {
+          name = data.pdf.name || `Document ${id}`;
+        } else if (data.name) {
+          name = data.name;
+        } else {
+          name = `Document ${id}`;
+        }
+
         return {
           id: id.toString(),
-          name: data.name || data.title || `Document ${id}`,
-          isPrimary: primaryPdf ? String(primaryPdf.id) === String(id) : false
+          name: name,
+          isPrimary: primaryPdf ? String(primaryPdf) === String(id) : false
         };
       } catch (error) {
         console.error(`Failed to fetch document ${id}:`, error);
         return {
           id: id.toString(),
           name: `Document ${id}`,
-          isPrimary: primaryPdf ? String(primaryPdf.id) === String(id) : false
+          isPrimary: primaryPdf ? String(primaryPdf) === String(id) : false
         };
       }
     });
@@ -843,10 +939,12 @@ const fetchDocumentNames = async (pdfIds: string[]): Promise<DocumentInfo[]> => 
   }
 };
 
+// Reset store state
 const resetAll = () => {
   set(INITIAL_STATE);
 };
 
+// Reset error state
 const resetError = () => {
   set({ error: '', lastMessageFailed: false });
 };
@@ -864,7 +962,6 @@ export {
   insertMessageToActive,
   removeMessageFromActive,
   scoreConversation,
-  // Research mode exports
   sendMessage,
   regenerateResponse,
   activateResearchMode,
@@ -872,5 +969,6 @@ export {
   acceptRecommendedDocument,
   fetchAvailableDocuments,
   updateResearchModeFromActiveConversation,
-  deleteDocument
+  deleteDocument,
+  streamMessage
 };

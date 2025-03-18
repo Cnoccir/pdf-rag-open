@@ -21,7 +21,7 @@
 			{#if user}
 				<a
 					class="font-medium text-gray-600 hover:text-gray-400 dark:text-gray-400 dark:hover:text-gray-500"
-					href="/scores">Scores</a
+					href="/health">Health</a
 				>
 				<a
 					class="font-medium text-gray-600 hover:text-gray-400 dark:text-gray-400 dark:hover:text-gray-500"

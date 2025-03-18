@@ -1,0 +1,29 @@
+{
+  "id": "c83f3700-e61c-478b-ad80-a26f3c372a30",
+  "title": "Conversation about 6d537bdc-7546-4281-8243-c031232bd2c1",
+  "pdf_id": "6d537bdc-7546-4281-8243-c031232bd2c1",
+  "metadata": {
+    "pdf_id": "6d537bdc-7546-4281-8243-c031232bd2c1",
+    "created_at": "2025-03-18T00:21:57.447014",
+    "research_mode": {
+      "active": true,
+      "pdf_ids": [
+        "6d537bdc-7546-4281-8243-c031232bd2c1",
+        "2639e498-5594-4750-8daa-c84486ac98c2"
+      ],
+      "document_names": {
+        "6d537bdc-7546-4281-8243-c031232bd2c1": "Document 6d537bdc-7546-4281-8243-c031232bd2c1",
+        "2639e498-5594-4750-8daa-c84486ac98c2": "Document 2639e498-5594-4750-8daa-c84486ac98c2"
+      }
+    }
+  },
+  "messages": [
+    {
+      "type": "system",
+      "content": "You are an AI assistant specialized in answering questions about documents.",
+      "metadata": {},
+      "created_at": "2025-03-17T20:26:10.596308"
+    }
+  ],
+  "updated_at": "2025-03-17T20:26:10.598490"
+}

@@ -1,0 +1,18 @@
+{
+  "id": "26b5964c-7c51-454e-8859-be1cce4ff1c8",
+  "title": "Conversation about 6d537bdc-7546-4281-8243-c031232bd2c1",
+  "pdf_id": "6d537bdc-7546-4281-8243-c031232bd2c1",
+  "metadata": {
+    "pdf_id": "6d537bdc-7546-4281-8243-c031232bd2c1",
+    "created_at": "2025-03-18T00:09:42.133913"
+  },
+  "messages": [
+    {
+      "type": "system",
+      "content": "You are an AI assistant specialized in answering questions about documents.",
+      "metadata": {},
+      "created_at": "2025-03-17T20:09:42.133913"
+    }
+  ],
+  "updated_at": "2025-03-17T20:09:42.134923"
+}

@@ -1,8 +1,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { fade } from 'svelte/transition';
+  import { store } from '$s/chat/store';
 
-  const messages = [
+  // Use stream progress from store
+  $: progress = $store.streamProgress;
+
+  // Backup messages in case stream progress is not available
+  const fallbackMessages = [
     "Searching document knowledge...",
     "Analyzing relevant content...",
     "Connecting concepts...",
@@ -13,7 +18,7 @@
   let currentMessageIndex = 0;
   let displayedMessage = '';
   let intervalId: ReturnType<typeof setInterval>;
-  let progress = 0;
+  let fallbackProgress = 0;
   let finishedInitialMessages = false;
 
   function typewriterEffect(message: string, index = 0) {
@@ -24,11 +29,11 @@
   }
 
   function nextMessage() {
-    if (currentMessageIndex < messages.length - 1) {
+    if (currentMessageIndex < fallbackMessages.length - 1) {
       currentMessageIndex += 1;
-      typewriterEffect(messages[currentMessageIndex]);
+      typewriterEffect(fallbackMessages[currentMessageIndex]);
       // Update progress based on pipeline stage
-      progress = (currentMessageIndex + 1) * (100 / messages.length);
+      fallbackProgress = (currentMessageIndex + 1) * (100 / fallbackMessages.length);
     } else {
       finishedInitialMessages = true;
       displayedMessage = "Finalizing response...";
@@ -36,12 +41,18 @@
   }
 
   function startProgress() {
-    typewriterEffect(messages[currentMessageIndex]);
-    intervalId = setInterval(() => {
-      if (!finishedInitialMessages) {
-        nextMessage();
-      }
-    }, 2200); // Show each stage for 2.2 seconds
+    if (progress.active) {
+      // Use stream progress if available
+      displayedMessage = progress.message;
+    } else {
+      // Fallback to basic messaging
+      typewriterEffect(fallbackMessages[currentMessageIndex]);
+      intervalId = setInterval(() => {
+        if (!finishedInitialMessages) {
+          nextMessage();
+        }
+      }, 2200); // Show each stage for 2.2 seconds
+    }
   }
 
   onMount(() => {
@@ -49,8 +60,11 @@
   });
 
   onDestroy(() => {
-    clearInterval(intervalId);
+    if (intervalId) clearInterval(intervalId);
   });
+
+  // Get actual progress percentage to display
+  $: displayProgress = progress.active ? progress.percentage : fallbackProgress;
 </script>
 
 <div class="pending-message" transition:fade={{ duration: 300 }}>
@@ -66,11 +80,19 @@
     </svg>
   </div>
   <div class="message-content">
-    <div class="message">{displayedMessage}</div>
+    <div class="process-info">
+      {#if progress.active}
+        <span class="stage-badge">{progress.stage}</span>
+      {/if}
+      <div class="message">{progress.active ? progress.message : displayedMessage}</div>
+    </div>
     <div class="progress-container">
       <div class="progress-bar">
-        <div class="progress" style="width: {progress}%"></div>
+        <div class="progress" style="width: {displayProgress}%"></div>
       </div>
+      {#if displayProgress > 0}
+        <div class="progress-percentage">{Math.round(displayProgress)}%</div>
+      {/if}
     </div>
   </div>
 </div>
@@ -99,7 +121,8 @@
     background-color: white;
     border-radius: 12px 12px 12px 0;
     padding: 16px;
-    min-width: 260px;
+    min-width: 280px;
+    max-width: 85%;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
     animation: pulse 2s infinite ease-in-out;
   }
@@ -110,24 +133,43 @@
     100% { box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05); }
   }
 
+  .process-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+
+  .stage-badge {
+    display: inline-block;
+    padding: 3px 8px;
+    background-color: #e9f2ff;
+    color: #4a63ee;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    align-self: flex-start;
+    margin-bottom: 4px;
+  }
+
   .message {
     font-size: 15px;
     color: #4b5563;
-    margin-bottom: 12px;
-    min-height: 20px;
     font-weight: 500;
   }
 
   .progress-container {
-    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .progress-bar {
+    flex-grow: 1;
     background-color: #e2e8f0;
     height: 4px;
     border-radius: 2px;
     overflow: hidden;
-    margin-top: 8px;
   }
 
   .progress {
@@ -135,5 +177,12 @@
     height: 100%;
     border-radius: 2px;
     transition: width 0.4s ease-in-out;
+  }
+
+  .progress-percentage {
+    font-size: 12px;
+    color: #6b7280;
+    min-width: 32px;
+    text-align: right;
   }
 </style>
