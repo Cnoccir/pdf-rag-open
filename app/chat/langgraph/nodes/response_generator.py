@@ -68,7 +68,7 @@ If documents contradict each other, present both perspectives fairly.
 async def generate_response(state: GraphState) -> GraphState:
     """
     Generate the final response based on retrieved content and knowledge synthesis.
-    Provides improved citations and handles research mode elegantly.
+    Enhanced with better fallback mechanisms when retrieval fails.
 
     Args:
         state: Current graph state
@@ -77,18 +77,68 @@ async def generate_response(state: GraphState) -> GraphState:
         Updated graph state with generated response
     """
     try:
-        if (not state.retrieval_state or not state.query_state):
-            logger.error("Retrieval state and query state are required for response generation")
+        if (not state.query_state):
+            logger.error("Query state is required for response generation")
             raise ValueError("Required states are missing")
 
-        # Check if we have enough elements for a response
-        if not state.retrieval_state.elements or len(state.retrieval_state.elements) == 0:
-            logger.warning("No elements retrieved, generating fallback response")
-            # Generate fallback response
-            state.generation_state = GenerationState(
-                response="I couldn't find specific information to answer your query. Could you please rephrase or provide more details?",
-                metadata={"fallback": True}
+        # Check if we have retrieval state
+        if not state.retrieval_state:
+            logger.warning("No retrieval state found, creating empty retrieval state")
+            state.retrieval_state = RetrievalState(
+                elements=[],
+                sources=[],
+                metadata={"error": "Retrieval state missing"}
             )
+
+        # Check if we have enough elements for a response
+        has_elements = (state.retrieval_state.elements and len(state.retrieval_state.elements) > 0)
+
+        # Generate appropriate response based on retrieval success
+        if not has_elements:
+            logger.warning("No elements retrieved, generating fallback response")
+
+            # Check for specific database errors
+            error_msg = ""
+            if state.retrieval_state.metadata and "error" in state.retrieval_state.metadata:
+                error_msg = state.retrieval_state.metadata["error"]
+                logger.warning(f"Retrieval error: {error_msg}")
+
+            # Look for Neo4j specific errors
+            neo4j_issue = False
+            index_issue = False
+            if "Neo4j" in error_msg or "neo4j" in error_msg:
+                neo4j_issue = True
+                if "index" in error_msg or "Index" in error_msg:
+                    index_issue = True
+
+            # Generate appropriate fallback response
+            if neo4j_issue:
+                if index_issue:
+                    fallback_msg = ("I couldn't retrieve information from the document database due to a missing index. "
+                                   "The database may need to be properly set up with the required indices. "
+                                   "Please try uploading your document again or contact support.")
+                else:
+                    fallback_msg = ("I'm having trouble connecting to the document database. "
+                                   "This might be due to a temporary issue. "
+                                   "Please try again in a few moments or contact support if the problem persists.")
+            else:
+                # Generic fallback for when retrieval simply found nothing relevant
+                fallback_msg = ("I couldn't find specific information in the document to answer your query. "
+                               "Could you please rephrase your question or provide more details about what you're looking for?")
+
+                # Add suggestions for the specific document they uploaded
+                if state.conversation_state and state.conversation_state.pdf_id:
+                    pdf_id = state.conversation_state.pdf_id
+                    fallback_msg += f"\n\nSince this document appears to be about Neo4j database content, you might try asking about nodes, relationships, or Cypher queries."
+
+            # Create generation state with fallback response
+            state.generation_state = GenerationState(
+                response=fallback_msg,
+                citations=[],
+                metadata={"fallback": True, "reason": "no_results"}
+            )
+
+            logger.info("Generated fallback response due to retrieval issues")
             return state
 
         logger.info(f"Generating response for query: {state.query_state.query}")
@@ -123,7 +173,7 @@ async def generate_response(state: GraphState) -> GraphState:
             # Create citation ID
             citation_id = f"[{i+1}]"
 
-            # Get PDF ID and page info
+            # Get PDF ID and page info safely
             pdf_id = element.pdf_id if hasattr(element, 'pdf_id') else "unknown"
             page = element.page if hasattr(element, 'page') else None
 

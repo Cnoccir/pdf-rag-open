@@ -1,4 +1,4 @@
-import { get } from 'svelte/store';
+import { get } from 'svelte/store'; // Ensure get is imported
 import { writable } from '../writeable';
 import { api } from '$api';
 
@@ -97,7 +97,7 @@ const set = (val: Partial<ChatState>) => {
 
 // Get active conversation
 const getActiveConversation = (): Conversation | null => {
-  const { conversations, activeConversationId } = get(store);
+  const { conversations, activeConversationId } = get(store); // Fixed: using get(store)
   if (!activeConversationId) {
     return null;
   }
@@ -158,7 +158,7 @@ const removeMessageFromActive = (id: string | number) => {
 
 // Add conversation scoring
 const scoreConversation = async (score: number) => {
-  const conversationId = get(store).activeConversationId;
+  const conversationId = get(store).activeConversationId; // Fixed: using get(store)
   if (!conversationId) return;
 
   try {
@@ -259,7 +259,7 @@ const createConversation = async (documentId: string) => {
     }
 
     // Add to conversations list
-    const currentConversations = get(store).conversations;
+    const currentConversations = get(store).conversations; // Fixed: using get(store)
 
     set({
       activeConversationId: data.id,
@@ -352,7 +352,7 @@ const updateResearchModeFromActiveConversation = () => {
 
 // Send a message
 const sendMessage = async (text: string, opts: MessageOpts = {}) => {
-  const conversationId = get(store).activeConversationId;
+  const conversationId = get(store).activeConversationId; // Fixed: using get(store)
   logDebug(`Sending message to conversation ${conversationId}, text: "${text.substring(0, 30)}..."`);
 
   if (!conversationId) {
@@ -368,7 +368,7 @@ const sendMessage = async (text: string, opts: MessageOpts = {}) => {
   set({ loading: true, error: '', lastMessageFailed: false });
 
   // Get current research mode state
-  const currentState = get(store);
+  const currentState = get(store); // Fixed: using get(store)
   const isResearchActive = currentState.researchMode;
   const activeDocuments = currentState.activeDocuments.map(doc => doc.id);
 
@@ -622,7 +622,7 @@ const sendNonStreamingMessage = async (text: string, conversationId: string, isR
 
 // Regenerate the response for a previously failed query
 const regenerateResponse = async (query: string, options: MessageOpts = {}) => {
-  const currentState = get(store);
+  const currentState = get(store); // Fixed: using get(store)
   const conversationId = currentState.activeConversationId;
 
   if (!conversationId) {
@@ -675,7 +675,7 @@ const activateResearchMode = async (conversationId: number, pdfIds: string[]) =>
     }
 
     // Get current conversation to identify primary document
-    const currentState = get(store);
+    const currentState = get(store); // Fixed: using get(store)
     const activeConv = currentState.conversations.find(c => c.id === conversationId);
     const primaryDocId = activeConv?.pdf_id?.toString();
 
@@ -786,7 +786,7 @@ const deactivateResearchMode = async (conversationId: number) => {
 
 // Accept a recommended document
 const acceptRecommendedDocument = async (documentId: string) => {
-  const state = get(store);
+  const state = get(store); // Fixed: using get(store)
   const conversationId = state.activeConversationId;
 
   if (!conversationId) return false;
@@ -864,7 +864,7 @@ const deleteDocument = async (documentId: string) => {
 const fetchDocumentNames = async (pdfIds: string[]): Promise<DocumentInfo[]> => {
   try {
     // First, try to get names from existing documents in the store
-    const existingDocs = get(store).availableDocuments;
+    const existingDocs = get(store).availableDocuments; // Fixed: using get(store)
     const cachedConversation = getActiveConversation();
     const primaryPdf = cachedConversation?.pdf_id;
 

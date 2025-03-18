@@ -16,16 +16,10 @@ from app.chat.types import ContentElement, SearchQuery
 logger = logging.getLogger(__name__)
 
 async def _retrieve_content_async(query_state: QueryState) -> RetrievalState:
-    """
-    Asynchronous implementation of content retrieval with improved Neo4j integration.
-
-    Args:
-        query_state: Query state with analysis
-
-    Returns:
-        Retrieval state with results
-    """
-    logger.info(f"Beginning retrieval using strategy: {query_state.retrieval_strategy.value} with {len(query_state.pdf_ids)} documents")
+    """Asynchronous implementation of content retrieval with improved Neo4j integration."""
+    # Add more detailed logging about PDF IDs
+    logger.info(f"Beginning retrieval: strategy={query_state.retrieval_strategy.value}, "
+               f"pdf_ids={query_state.pdf_ids}, query='{query_state.query[:30]}...'")
 
     # Initialize retrieval state
     retrieval_state = RetrievalState(
@@ -33,15 +27,32 @@ async def _retrieve_content_async(query_state: QueryState) -> RetrievalState:
     )
 
     try:
+        # Validate PDF IDs - this is critical
+        if not query_state.pdf_ids or len(query_state.pdf_ids) == 0:
+            error_msg = "No PDF IDs provided for retrieval"
+            logger.error(error_msg)
+            retrieval_state.metadata["error"] = error_msg
+            return retrieval_state
+
         # Get vector store instance
         vector_store = get_vector_store()
 
         if not vector_store:
-            raise ValueError("Neo4j vector store not available")
+            error_msg = "Neo4j vector store not available"
+            logger.error(error_msg)
+            retrieval_state.metadata["error"] = error_msg
+            return retrieval_state
 
+        # Try to initialize if needed
         if not vector_store.initialized:
             logger.info("Vector store not initialized, initializing...")
-            await vector_store.initialize_database()
+            init_success = await vector_store.initialize_database()
+            if not init_success:
+                error_msg = "Failed to initialize vector store"
+                logger.error(error_msg)
+                retrieval_state.metadata["error"] = error_msg
+                return retrieval_state
+            logger.info("Vector store initialized successfully")
 
         # Check if we have multiple PDFs (research mode)
         pdf_ids = query_state.pdf_ids
@@ -252,6 +263,7 @@ async def _retrieve_content_async(query_state: QueryState) -> RetrievalState:
 def retrieve_content(state: GraphState) -> GraphState:
     """
     Retrieve content based on query analysis.
+    This function properly handles event loops to prevent the 'Future attached to a different loop' error.
 
     Args:
         state: Current graph state
@@ -263,20 +275,50 @@ def retrieve_content(state: GraphState) -> GraphState:
     if not state.query_state:
         raise ValueError("Query state is required for retrieval")
 
-    # Create a new event loop to run the async retrieval
+    # Create a new event loop for this function call
+    retrieval_loop = asyncio.new_event_loop()
+
     try:
-        retrieval_state = asyncio.run(_retrieve_content_async(state.query_state))
-    except RuntimeError:
-        # If there's already an event loop running, create and use a new one
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Set the new loop as the current event loop for this thread
+        asyncio.set_event_loop(retrieval_loop)
+
+        # Run the async retrieval in this new loop
+        retrieval_state = retrieval_loop.run_until_complete(_retrieve_content_async(state.query_state))
+
+        # Update the graph state with the retrieval results
+        updated_state = state.model_copy()
+        updated_state.retrieval_state = retrieval_state
+
+        return updated_state
+
+    except Exception as e:
+        logger.error(f"Error in retrieval: {str(e)}", exc_info=True)
+
+        # Create a minimal retrieval state with error information
+        error_retrieval_state = RetrievalState(
+            elements=[],
+            sources=[],
+            metadata={"error": str(e)}
+        )
+
+        # Update state with error information
+        updated_state = state.model_copy()
+        updated_state.retrieval_state = error_retrieval_state
+
+        return updated_state
+
+    finally:
+        # Clean up any pending tasks
         try:
-            retrieval_state = loop.run_until_complete(_retrieve_content_async(state.query_state))
-        finally:
-            loop.close()
+            pending_tasks = [task for task in asyncio.all_tasks(retrieval_loop) if not task.done()]
+            if pending_tasks:
+                for task in pending_tasks:
+                    task.cancel()
 
-    # Update the graph state
-    updated_state = state.model_copy()
-    updated_state.retrieval_state = retrieval_state
+                # Wait for tasks to cancel with a timeout
+                retrieval_loop.run_until_complete(asyncio.wait(pending_tasks, timeout=1.0))
+        except Exception as cleanup_error:
+            logger.error(f"Error cleaning up tasks: {str(cleanup_error)}")
 
-    return updated_state
+        # Close the loop
+        retrieval_loop.close()

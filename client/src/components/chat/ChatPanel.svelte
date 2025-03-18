@@ -1,6 +1,7 @@
 <!-- ChatPanel.svelte -->
 <script lang="ts">
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+  import { get } from 'svelte/store'; // Added this import for get(store)
   import {
     store,
     resetError,
@@ -27,7 +28,6 @@
 
   // Use localStorage for feature toggles
   let useStreaming = !!localStorage.getItem('streaming');
-  let useResearch = false; // Now controlled by state
   let isSubmitting = false; // Flag to prevent duplicate submissions
   let lastQuery = ""; // Store the last query for regeneration
   let isRegenerating = false; // Track regeneration state
@@ -37,7 +37,7 @@
   let availableDocuments = [];
   let isLoadingDocuments = false;
 
-  // Get research mode from store
+  // Get research mode from store using Svelte's reactive syntax
   $: useResearch = $store.researchMode;
   $: activeDocuments = $store.activeDocuments;
   $: recommendedDocuments = $store.recommendedDocuments;

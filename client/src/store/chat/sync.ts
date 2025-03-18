@@ -1,3 +1,4 @@
+import { get } from 'svelte/store'; // Added this import
 import type { Message, MessageOpts } from './store';
 import { store, set, insertMessageToActive, removeMessageFromActive } from './store';
 import { api, getErrorMessage } from '$api';
@@ -18,13 +19,13 @@ export const sendMessage = async (input: Message, opts: MessageOpts = {}) => {
   try {
     _addPendingMessage(input, pendingId);
 
-    const conversationId = store.get().activeConversationId;
+    const conversationId = get(store).activeConversationId; // Fixed: store.get() → get(store)
     if (!conversationId) {
       throw new Error("No active conversation");
     }
 
     // Get research mode state from store if not specified in opts
-    const currentState = store.get();
+    const currentState = get(store); // Fixed: store.get() → get(store)
     const useResearch = opts.useResearch !== undefined ? opts.useResearch : currentState.researchMode;
     const activeDocs = opts.activeDocs || currentState.activeDocuments.map(doc => doc.id);
 

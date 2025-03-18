@@ -165,7 +165,17 @@ class ChatManager:
             if self.research_mode == ResearchMode.RESEARCH:
                 system_prompt = f"{self.BASE_SYSTEM_PROMPT}\n\n{self.RESEARCH_MODE_PROMPT}"
 
-            self.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
+            # Ensure conversation_state is valid before adding messages
+            if self.conversation_state:
+                self.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
+            else:
+                # If conversation state creation failed, create one locally
+                from app.chat.langgraph.state import ConversationState
+                self.conversation_state = ConversationState(
+                    conversation_id=self.conversation_id,
+                    title=f"Conversation about {self.pdf_id}" if self.pdf_id else f"New Conversation"
+                )
+                self.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
 
             logger.info(f"Generated new conversation ID: {self.conversation_id}")
 
@@ -269,16 +279,6 @@ class ChatManager:
             return await self.aquery(query, pdf_ids)
 
     async def aquery(self, query: str, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-        """
-        Execute a query using the query graph.
-
-        Args:
-            query: User query
-            pdf_ids: Optional list of PDF IDs to search
-
-        Returns:
-            Query results including generated response
-        """
         logger.info(f"Processing query: {query}")
 
         # Use the PDF ID from init if not provided
@@ -328,7 +328,7 @@ class ChatManager:
                         "conversation_id": self.conversation_id
                     }
 
-            # Run LangGraph
+            # Run LangGraph with a new event loop to prevent conflicts
             result = await graph.ainvoke(state)
 
             # Update conversation state from result
@@ -337,7 +337,6 @@ class ChatManager:
 
                 # Save updated conversation
                 await self.memory_manager.save_conversation(self.conversation_state)
-
                 logger.info(f"Saved conversation with {len(self.conversation_state.messages)} messages")
 
             # Prepare response
@@ -353,6 +352,19 @@ class ChatManager:
             logger.info(f"Query processing complete, response length: {len(response['response']) if response['response'] else 0}")
             return response
 
+        except RuntimeError as e:
+            # Handle specific asyncio errors
+            if "cannot schedule new futures after shutdown" in str(e):
+                logger.error("Executor shutdown error - this is likely due to event loop or executor mismanagement")
+                return {
+                    "status": "error",
+                    "query": query,
+                    "error": "Internal execution error. Please try your query again.",
+                    "conversation_id": self.conversation_id
+                }
+            else:
+                # Re-raise other runtime errors
+                raise
         except Exception as e:
             logger.error(f"Query processing failed: {str(e)}", exc_info=True)
             logger.error(traceback.format_exc())

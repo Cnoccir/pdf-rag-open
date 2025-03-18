@@ -58,7 +58,7 @@ class Message(BaseModel):
         if value is None:
             self.meta_json = "{}"
             return
-            
+
         if not isinstance(value, dict):
             logger.warning(f"Attempted to set non-dict metadata for message {self.id}")
             # Convert to dict if possible
@@ -66,7 +66,7 @@ class Message(BaseModel):
                 value = {"value": value}
             except:
                 value = {}
-                
+
         try:
             # Handle any non-serializable values
             self.meta_json = json.dumps(value, default=str)
@@ -90,7 +90,7 @@ class Message(BaseModel):
     def get_metadata(self) -> dict:
         """Legacy method for metadata access"""
         return self.msg_metadata
-        
+
     def set_metadata(self, metadata: dict) -> None:
         """Legacy method for metadata setting"""
         self.msg_metadata = metadata
@@ -127,7 +127,7 @@ class Message(BaseModel):
             )
         elif self.role == "assistant":
             return AIMessage(
-                content=self.content,
+                content=self.content, 
                 additional_kwargs=additional_kwargs
             )
         elif self.role == "system":
@@ -174,12 +174,12 @@ class Message(BaseModel):
 
         # Extract metadata
         metadata = getattr(message, "additional_kwargs", {}).copy()
-        
+
         # Include message-specific metadata
         if isinstance(message, ToolMessage):
             metadata["tool_call_id"] = message.tool_call_id
             metadata["name"] = message.name
-            
+
         # Include any other metadata attached to the message
         if hasattr(message, "metadata") and message.metadata:
             # Ensure we don't overwrite existing keys

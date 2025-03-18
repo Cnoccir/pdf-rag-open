@@ -2,6 +2,7 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import Icon from '$c/Icon.svelte';
 
+  // Add default values to all props
   export let activeDocuments = [];
   export let recommendedDocuments = [];
   export let primaryDocumentId = null; // ID of primary document
@@ -10,13 +11,18 @@
   let expanded = false;
   let mounted = false;
 
+  // Create safe versions of all props
+  $: safeActiveDocuments = Array.isArray(activeDocuments) ? activeDocuments : [];
+  $: safeRecommendedDocuments = Array.isArray(recommendedDocuments) ? recommendedDocuments : [];
+  $: safePrimaryDocumentId = primaryDocumentId || "";
+
   // Debug logging
-  $: console.log("Active documents in indicator:", activeDocuments);
-  $: console.log("Primary document ID:", primaryDocumentId);
-  $: console.log("Recommended documents:", recommendedDocuments);
+  $: console.log("Active documents in indicator:", safeActiveDocuments);
+  $: console.log("Primary document ID:", safePrimaryDocumentId);
+  $: console.log("Recommended documents:", safeRecommendedDocuments);
 
   // Force component refresh when data changes
-  $: if (mounted && (activeDocuments.length || recommendedDocuments.length)) {
+  $: if (mounted && (safeActiveDocuments.length || safeRecommendedDocuments.length)) {
     console.log("Research data updated - refreshing component");
     checkDocumentData();
   }
@@ -28,9 +34,9 @@
 
   function checkDocumentData() {
     // Verify document data integrity
-    if (activeDocuments.length > 0) {
-      const hasPrimary = activeDocuments.some(doc => isPrimaryDocument(doc));
-      if (!hasPrimary && primaryDocumentId) {
+    if (safeActiveDocuments.length > 0) {
+      const hasPrimary = safeActiveDocuments.some(doc => isPrimaryDocument(doc));
+      if (!hasPrimary && safePrimaryDocumentId) {
         console.warn("Primary document not found in active documents - data inconsistency");
       }
     }
@@ -42,13 +48,15 @@
 
   function handleAddDocument(documentId) {
     console.log("Adding document:", documentId);
-    dispatch('addDocument', { documentId });
+    if (documentId) {
+      dispatch('addDocument', { documentId });
+    }
   }
 
   function handleRemoveDocument(documentId) {
     console.log("Removing document:", documentId);
     // Prevent removing the primary document
-    if (!isPrimaryDocument({ id: documentId })) {
+    if (documentId && !isPrimaryDocument({ id: documentId })) {
       dispatch('removeDocument', { documentId });
     } else {
       console.warn("Attempted to remove primary document, which is not allowed");
@@ -56,16 +64,23 @@
   }
 
   function handleOpenDocument(doc) {
-    console.log("Opening document:", doc.id);
-    dispatch('openDocument', { documentId: doc.id, name: getDocumentName(doc) });
+    console.log("Opening document:", doc?.id);
+    if (doc && doc.id) {
+      dispatch('openDocument', { documentId: doc.id, name: getDocumentName(doc) });
+    }
   }
 
   function isPrimaryDocument(document) {
+    // Safe check with null handling
+    if (!document || !document.id || !safePrimaryDocumentId) return false;
+
     // Ensure the ID comparison is done correctly with string conversion
-    return document && String(document.id) === String(primaryDocumentId);
+    return String(document.id) === String(safePrimaryDocumentId);
   }
 
   function getDocumentName(doc) {
+    if (!doc) return "Unknown Document";
+
     // First try to use the document's name property
     if (doc.name && doc.name !== `Document ${doc.id}`) {
       return doc.name;
@@ -74,7 +89,7 @@
     // If the document is the primary document, try to use its name from the conversation
     if (isPrimaryDocument(doc)) {
       // Try to find the primary document's name from active documents
-      const primaryDoc = activeDocuments.find(d => isPrimaryDocument(d));
+      const primaryDoc = safeActiveDocuments.find(d => isPrimaryDocument(d));
       if (primaryDoc && primaryDoc.name) {
         return primaryDoc.name;
       }
@@ -91,20 +106,20 @@
   // Handle errors if data is inconsistent
   function getActiveDocumentsSafe() {
     // Ensures we always have an array even if data is incorrect
-    if (!activeDocuments || !Array.isArray(activeDocuments)) {
-      console.error("Active documents is not an array:", activeDocuments);
+    if (!safeActiveDocuments || !Array.isArray(safeActiveDocuments)) {
+      console.error("Active documents is not an array:", safeActiveDocuments);
       return [];
     }
-    return activeDocuments;
+    return safeActiveDocuments;
   }
 
   function getRecommendedDocumentsSafe() {
     // Ensures we always have an array even if data is incorrect
-    if (!recommendedDocuments || !Array.isArray(recommendedDocuments)) {
-      console.error("Recommended documents is not an array:", recommendedDocuments);
+    if (!safeRecommendedDocuments || !Array.isArray(safeRecommendedDocuments)) {
+      console.error("Recommended documents is not an array:", safeRecommendedDocuments);
       return [];
     }
-    return recommendedDocuments;
+    return safeRecommendedDocuments;
   }
 </script>
 

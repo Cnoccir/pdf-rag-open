@@ -68,79 +68,51 @@ def async_handler(func):
 def run_async(coro: Coroutine) -> Any:
     """
     Run an async function in a synchronous context with enhanced error handling.
-
-    Args:
-        coro: Coroutine to execute
-
-    Returns:
-        Result of the coroutine execution
     """
     try:
-        # Check if we're already running in an event loop
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Create new event loop since we can't use the running one
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            # No event loop exists, create a new one
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # Use a fresh event loop for each run to avoid contamination
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-        # Preserve app context if needed
-        if has_app_context():
-            app_context = current_app._get_current_object().app_context()
-
-            # Define function to run with app context
-            async def run_with_app_context():
-                with app_context:
-                    return await coro
-
-            # Run with app context preservation
-            coro_to_run = run_with_app_context()
-        else:
-            # No app context to preserve
-            coro_to_run = coro
+        # Configure the loop with a larger thread pool
+        import concurrent.futures
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        loop.set_default_executor(executor)
 
         try:
-            # Run the coroutine
-            result = loop.run_until_complete(coro_to_run)
+            # Preserve app context if needed
+            if has_app_context():
+                app_context = current_app._get_current_object().app_context()
+
+                # Define function to run with app context
+                async def run_with_app_context():
+                    with app_context:
+                        return await coro
+
+                # Run with app context preservation
+                result = loop.run_until_complete(run_with_app_context())
+            else:
+                # No app context to preserve
+                result = loop.run_until_complete(coro)
+
             return result
-        except asyncio.CancelledError:
-            logger.warning("Async operation was cancelled")
-            raise
-        except Exception as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
-            logger.error(f"Error running async function: {str(e)}")
-            logger.error("Exception traceback:")
-            traceback_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
-            for line in traceback_lines:
-                logger.error(line.rstrip())
-
-            # Re-raise the original exception
-            raise
         finally:
-            # Clean up the loop
+            # Properly clean up all resources
             try:
-                # Cancel and clean up any pending tasks
+                # Cancel pending tasks
                 tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
                 if tasks:
                     for task in tasks:
                         task.cancel()
-                    # Wait for cancellation with a timeout
-                    try:
-                        loop.run_until_complete(asyncio.wait(tasks, timeout=1.0))
-                    except asyncio.CancelledError:
-                        pass
-            except Exception as e:
-                logger.error(f"Error cleaning up async tasks: {str(e)}")
+                    loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            except Exception as cleanup_err:
+                logger.error(f"Error during task cleanup: {str(cleanup_err)}")
             finally:
-                # Close the loop if it's not the main event loop
-                if not loop.is_running() and loop != asyncio.get_event_loop():
-                    loop.close()
+                # Don't immediately close - run loop a bit longer to process cancellations
+                loop.run_until_complete(asyncio.sleep(0.1))
+                loop.close()
+                executor.shutdown(wait=False)
     except Exception as e:
-        # Handle any issues with event loop setup
         logger.error(f"Event loop error: {str(e)}")
         logger.error(traceback.format_exc())
         raise

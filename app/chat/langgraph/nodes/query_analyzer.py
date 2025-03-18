@@ -24,7 +24,7 @@ Given a user question, you need to:
 
 Retrieval Strategies:
 - SEMANTIC: For conceptual questions that require deep understanding
-- KEYWORD: For specific term lookups 
+- KEYWORD: For specific term lookups
 - HYBRID: Combination of semantic and keyword (default)
 - CONCEPT: For questions about relationships between ideas
 - TABLE: For questions specifically about tabular data
@@ -50,11 +50,11 @@ Determine:
 async def process_query(query: str, pdf_ids: List[str] = None) -> Dict[str, Any]:
     """
     Process a user query to determine the optimal retrieval strategy.
-    
+
     Args:
         query: The user's query text
         pdf_ids: Optional list of PDF IDs to search within
-        
+
     Returns:
         Dictionary with query analysis results
     """
@@ -68,14 +68,14 @@ async def process_query(query: str, pdf_ids: List[str] = None) -> Dict[str, Any]
             "focused_elements": ["text"],
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
         # Use OpenAI to analyze the query if it's complex enough
         if len(query.split()) > 3:  # Only analyze non-trivial queries
             client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-            
+
             # Prepare the prompt
             formatted_prompt = QUERY_ANALYSIS_PROMPT.format(query=query)
-            
+
             # Call the model
             response = await client.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -86,10 +86,10 @@ async def process_query(query: str, pdf_ids: List[str] = None) -> Dict[str, Any]
                 temperature=0.3,
                 max_tokens=150
             )
-            
+
             # Extract analysis from response
             analysis_text = response.choices[0].message.content
-            
+
             # Parse the analysis (simple keyword-based parsing)
             if "SEMANTIC" in analysis_text:
                 result["retrieval_strategy"] = RetrievalStrategy.SEMANTIC
@@ -105,7 +105,7 @@ async def process_query(query: str, pdf_ids: List[str] = None) -> Dict[str, Any]
                 result["focused_elements"] = ["figure"]
             elif "COMBINED" in analysis_text:
                 result["retrieval_strategy"] = RetrievalStrategy.COMBINED
-            
+
             # Extract query type if present
             if "query_type" in analysis_text.lower():
                 query_type_line = [line for line in analysis_text.split('\n') if "query_type" in line.lower()]
@@ -113,7 +113,7 @@ async def process_query(query: str, pdf_ids: List[str] = None) -> Dict[str, Any]
                     # Simple extraction, can be improved for robustness
                     query_type = query_type_line[0].split(":")[-1].strip().strip('"').lower()
                     result["query_type"] = query_type
-            
+
             # Extract focused elements if present
             if "focused_elements" in analysis_text.lower():
                 elements_line = [line for line in analysis_text.split('\n') if "focused_elements" in line.lower()]
@@ -123,10 +123,10 @@ async def process_query(query: str, pdf_ids: List[str] = None) -> Dict[str, Any]
                     elements = [e.strip().strip('"').strip("'").strip(",") for e in elements_text.split()]
                     if elements:
                         result["focused_elements"] = elements
-        
+
         logger.info(f"Query analysis result: strategy={result['retrieval_strategy']}, type={result['query_type']}")
         return result
-        
+
     except Exception as e:
         logger.error(f"Error in query analysis: {str(e)}")
         # Fall back to default analysis
@@ -143,44 +143,44 @@ async def process_query(query: str, pdf_ids: List[str] = None) -> Dict[str, Any]
 def analyze(state: GraphState) -> GraphState:
     """
     Analyze a user query to determine the optimal retrieval strategy.
-    
+
     Args:
         state: Current graph state
-        
+
     Returns:
         Updated graph state
     """
     if not state.query_state:
         logger.error("Query state is required for query analysis")
         raise ValueError("Query state is required")
-    
+
     # For now, use basic heuristics to determine retrieval strategy
     # In a production system, this would use a more sophisticated ML-based approach
-    query = state.query_state.query.lower()
-    
+    query = state.query_state.query.lower() if state.query_state.query else ""
+
     # Detect specific content types
     focused_elements = []
     if any(term in query for term in ["table", "row", "column", "cell", "tabular"]):
         focused_elements.append(ContentType.TABLE)
         state.query_state.retrieval_strategy = RetrievalStrategy.TABLE
-    
+
     elif any(term in query for term in ["image", "figure", "diagram", "chart", "picture", "photo"]):
         focused_elements.append(ContentType.FIGURE)
         state.query_state.retrieval_strategy = RetrievalStrategy.IMAGE
-    
+
     elif any(term in query for term in ["relate", "relationship", "concept", "connection", "between"]):
         state.query_state.retrieval_strategy = RetrievalStrategy.CONCEPT
-    
+
     elif any(term in query for term in ["exact", "specific", "find", "locate", "where"]):
         state.query_state.retrieval_strategy = RetrievalStrategy.KEYWORD
-    
+
     else:
         # Default to hybrid retrieval
         state.query_state.retrieval_strategy = RetrievalStrategy.HYBRID
-    
+
     # Set focused elements
     state.query_state.focused_elements = focused_elements
-    
+
     # Extract simple keywords (could be enhanced with NLP)
     import re
     words = re.findall(r'\b\w+\b', query)
@@ -188,7 +188,7 @@ def analyze(state: GraphState) -> GraphState:
         "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
         "about", "does", "this", "that", "these", "those", "have", "from"
     ]]
-    
+
     # Set query type based on interrogative words
     if "how" in query:
         state.query_state.query_type = "procedural"
@@ -200,9 +200,9 @@ def analyze(state: GraphState) -> GraphState:
         state.query_state.query_type = "factual"
     else:
         state.query_state.query_type = "general"
-    
+
     # Log analysis results
     logger.info(f"Query analysis: strategy={state.query_state.retrieval_strategy}, " +
                f"type={state.query_state.query_type}, elements={focused_elements}")
-    
+
     return state
