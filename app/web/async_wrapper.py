@@ -8,8 +8,10 @@ import functools
 import logging
 import traceback
 import sys
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, TypeVar 
 from flask import current_app, has_request_context, has_app_context, request, g
+
+T = TypeVar('T')
 
 logger = logging.getLogger(__name__)
 
@@ -65,57 +67,63 @@ def async_handler(func):
 
     return wrapper
 
-def run_async(coro: Coroutine) -> Any:
+def run_async(coro: Coroutine[Any, Any, T], timeout: float = 30.0) -> T:
     """
-    Run an async function in a synchronous context with enhanced error handling.
-    """
-    try:
-        # Use a fresh event loop for each run to avoid contamination
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    Run an async function in a synchronous context with proper cleanup.
+    Safely handles cases where it's called from within an existing event loop.
 
-        # Configure the loop with a larger thread pool
+    Args:
+        coro: Coroutine to execute
+        timeout: Timeout in seconds
+
+    Returns:
+        Result of the coroutine execution
+    """
+    # Check if we're already in an event loop
+    try:
+        current_loop = asyncio.get_running_loop()
+        # If we get here, we're already in an event loop
+        # Use run_coroutine_threadsafe to run in the existing loop from a different thread
         import concurrent.futures
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-        loop.set_default_executor(executor)
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = asyncio.run_coroutine_threadsafe(coro, current_loop)
+            try:
+                return future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                logger.warning(f"Async operation timed out after {timeout}s")
+                return None
+            except Exception as e:
+                logger.error(f"Error in threaded async execution: {str(e)}")
+                return None
+    except RuntimeError:
+        # No event loop running, create a new one
+        loop = asyncio.new_event_loop()
 
         try:
-            # Preserve app context if needed
-            if has_app_context():
-                app_context = current_app._get_current_object().app_context()
+            # Set the loop as current
+            asyncio.set_event_loop(loop)
 
-                # Define function to run with app context
-                async def run_with_app_context():
-                    with app_context:
-                        return await coro
-
-                # Run with app context preservation
-                result = loop.run_until_complete(run_with_app_context())
-            else:
-                # No app context to preserve
-                result = loop.run_until_complete(coro)
-
-            return result
+            # Create a task and run it with timeout
+            task = loop.create_task(coro)
+            return loop.run_until_complete(asyncio.wait_for(task, timeout=timeout))
         finally:
-            # Properly clean up all resources
-            try:
-                # Cancel pending tasks
-                tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
-                if tasks:
-                    for task in tasks:
-                        task.cancel()
-                    loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
-            except Exception as cleanup_err:
-                logger.error(f"Error during task cleanup: {str(cleanup_err)}")
-            finally:
-                # Don't immediately close - run loop a bit longer to process cancellations
-                loop.run_until_complete(asyncio.sleep(0.1))
-                loop.close()
-                executor.shutdown(wait=False)
-    except Exception as e:
-        logger.error(f"Event loop error: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
+            # Clean up: cancel all pending tasks
+            pending_tasks = [task for task in asyncio.all_tasks(loop)
+                            if not task.done() and task != asyncio.current_task(loop)]
+
+            if pending_tasks:
+                for task in pending_tasks:
+                    task.cancel()
+
+                # Wait for tasks to cancel
+                if loop.is_running():
+                    loop.create_task(asyncio.gather(*pending_tasks, return_exceptions=True))
+                else:
+                    loop.run_until_complete(asyncio.gather(*pending_tasks, return_exceptions=True))
+
+            # Close the loop
+            loop.close()
 
 # Add specialized task management utilities
 def create_background_task(coro: Coroutine) -> asyncio.Task:

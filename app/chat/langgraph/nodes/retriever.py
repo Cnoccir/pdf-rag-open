@@ -4,6 +4,8 @@ This node handles document retrieval using various strategies based on query ana
 with optimized Neo4j vector store integration.
 """
 
+import time
+import concurrent.futures
 import logging
 import asyncio
 from typing import Dict, Any, List, Optional
@@ -275,21 +277,37 @@ def retrieve_content(state: GraphState) -> GraphState:
     if not state.query_state:
         raise ValueError("Query state is required for retrieval")
 
-    # Create a new event loop for this function call
-    retrieval_loop = asyncio.new_event_loop()
-
     try:
-        # Set the new loop as the current event loop for this thread
+        # Create a new event loop specifically for this function call
+        retrieval_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(retrieval_loop)
 
-        # Run the async retrieval in this new loop
-        retrieval_state = retrieval_loop.run_until_complete(_retrieve_content_async(state.query_state))
+        try:
+            # Run the async retrieval in this dedicated loop
+            retrieval_state = retrieval_loop.run_until_complete(_retrieve_content_async(state.query_state))
 
-        # Update the graph state with the retrieval results
-        updated_state = state.model_copy()
-        updated_state.retrieval_state = retrieval_state
+            # Update the graph state with the retrieval results
+            updated_state = state.model_copy()
+            updated_state.retrieval_state = retrieval_state
 
-        return updated_state
+            return updated_state
+
+        finally:
+            # Clean up any pending tasks
+            pending_tasks = [task for task in asyncio.all_tasks(retrieval_loop)
+                             if not task.done()]
+
+            if pending_tasks:
+                # Cancel all pending tasks
+                for task in pending_tasks:
+                    task.cancel()
+
+                # Wait for tasks to cancel with a timeout
+                retrieval_loop.run_until_complete(
+                    asyncio.wait(pending_tasks, timeout=1.0))
+
+            # Close the loop
+            retrieval_loop.close()
 
     except Exception as e:
         logger.error(f"Error in retrieval: {str(e)}", exc_info=True)
@@ -306,19 +324,3 @@ def retrieve_content(state: GraphState) -> GraphState:
         updated_state.retrieval_state = error_retrieval_state
 
         return updated_state
-
-    finally:
-        # Clean up any pending tasks
-        try:
-            pending_tasks = [task for task in asyncio.all_tasks(retrieval_loop) if not task.done()]
-            if pending_tasks:
-                for task in pending_tasks:
-                    task.cancel()
-
-                # Wait for tasks to cancel with a timeout
-                retrieval_loop.run_until_complete(asyncio.wait(pending_tasks, timeout=1.0))
-        except Exception as cleanup_error:
-            logger.error(f"Error cleaning up tasks: {str(cleanup_error)}")
-
-        # Close the loop
-        retrieval_loop.close()

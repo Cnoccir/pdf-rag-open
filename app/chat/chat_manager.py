@@ -15,6 +15,7 @@ from app.chat.langgraph.state import GraphState, QueryState, MessageType, Conver
 from app.chat.langgraph.graph import create_query_graph, create_document_graph, create_research_graph
 from app.chat.memories.memory_manager import MemoryManager
 from app.chat.vector_stores import get_vector_store
+from langgraph.errors import GraphRecursionError
 
 logger = logging.getLogger(__name__)
 
@@ -244,13 +245,14 @@ class ChatManager:
                 "error": str(e)
             }
 
-    async def query(self, query: str, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def query(self, query: str, pdf_ids: Optional[List[str]] = None, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Process a query using the appropriate LangGraph.
 
         Args:
             query: User query
             pdf_ids: Optional list of PDF IDs to search
+            config: Optional configuration for LangGraph processing
 
         Returns:
             Query results
@@ -276,27 +278,65 @@ class ChatManager:
                 }
         else:
             # Process as non-streaming query
-            return await self.aquery(query, pdf_ids)
+            # Pass the config parameter to aquery
+            return await self.aquery(query, pdf_ids, config=config)
 
-    async def aquery(self, query: str, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def query(self, query: str, pdf_ids: Optional[List[str]] = None, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Process a query using the appropriate LangGraph.
+
+        Args:
+            query: User query
+            pdf_ids: Optional list of PDF IDs to search
+            config: Optional configuration for LangGraph processing
+
+        Returns:
+            Query results
+        """
+        if self.stream_enabled:
+            # Collect all chunks for a complete response
+            chunks = []
+            final_response = None
+
+            async for chunk in self.stream_query(query, pdf_ids):
+                if "status" in chunk and chunk["status"] == "complete":
+                    final_response = chunk
+                elif "chunk" in chunk:
+                    chunks.append(chunk["chunk"])
+
+            if final_response:
+                return final_response
+            else:
+                # Build response from chunks
+                return {
+                    "response": "".join(chunks),
+                    "conversation_id": self.conversation_id
+                }
+        else:
+            # Process as non-streaming query.
+            # Pass the config parameter to aquery.
+            return await self.aquery(query, pdf_ids, config=config)
+
+
+    async def aquery(self, query: str, pdf_ids: Optional[List[str]] = None, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         logger.info(f"Processing query: {query}")
 
-        # Use the PDF ID from init if not provided
+        # Use the PDF ID from init if not provided.
         if not pdf_ids and self.pdf_id:
             pdf_ids = [self.pdf_id]
 
-        # Get PDF IDs from conversation metadata if in research mode
+        # Get PDF IDs from conversation metadata if in research mode.
         if self.research_mode == ResearchMode.RESEARCH and self.conversation_state and self.conversation_state.metadata:
             research_mode = self.conversation_state.metadata.get("research_mode", {})
             if research_mode.get("active") and research_mode.get("pdf_ids"):
                 pdf_ids = research_mode.get("pdf_ids")
                 logger.info(f"Using PDF IDs from research mode metadata: {pdf_ids}")
 
-        # Initialize if needed
+        # Initialize conversation state if needed.
         if not self.conversation_state:
             await self.initialize()
 
-        # Create initial state
+        # Create initial state.
         state = GraphState(
             query_state=QueryState(
                 query=query,
@@ -305,12 +345,15 @@ class ChatManager:
             conversation_state=self.conversation_state
         )
 
-        # Choose the appropriate graph based on research mode
+        # Choose the appropriate graph based on research mode.
         graph = self.research_graph if self.research_mode in [ResearchMode.RESEARCH, ResearchMode.MULTI] else self.query_graph
 
-        # Execute the graph
+        # Set default config if not provided.
+        if config is None:
+            config = {"recursion_limit": 100}  # Default recursion limit
+
         try:
-            # Ensure Neo4j is initialized
+            # Ensure Neo4j is initialized.
             if not self.neo4j_initialized:
                 try:
                     vector_store = get_vector_store()
@@ -328,34 +371,42 @@ class ChatManager:
                         "conversation_id": self.conversation_id
                     }
 
-            # Run LangGraph with a new event loop to prevent conflicts
-            result = await graph.ainvoke(state)
+            # Run LangGraph with the provided config.
+            result = await graph.ainvoke(state, config)
 
-            # Update conversation state from result
+            # Update conversation state from result.
             if result.conversation_state:
                 self.conversation_state = result.conversation_state
 
-                # Save updated conversation
+                # Save updated conversation.
                 await self.memory_manager.save_conversation(self.conversation_state)
                 logger.info(f"Saved conversation with {len(self.conversation_state.messages)} messages")
 
-            # Prepare response
+            # Prepare response.
             response = {
                 "query": query,
                 "response": result.generation_state.response if result.generation_state else None,
                 "citations": result.generation_state.citations if result.generation_state and hasattr(result.generation_state, "citations") else [],
                 "pdf_ids": pdf_ids or [],
                 "conversation_id": self.conversation_id,
-                "research_mode": self.conversation_state.metadata.get("research_mode") if self.conversation_state and self.conversation_state.metadata else None
+                "research_mode": (self.conversation_state.metadata.get("research_mode")
+                                  if self.conversation_state and self.conversation_state.metadata else None)
             }
 
             logger.info(f"Query processing complete, response length: {len(response['response']) if response['response'] else 0}")
             return response
 
+        except GraphRecursionError as e:
+            logger.error(f"Graph recursion limit reached: {str(e)}")
+            return {
+                "status": "error",
+                "query": query,
+                "error": "The processing graph reached its recursion limit. This is likely due to an internal configuration issue.",
+                "conversation_id": self.conversation_id
+            }
         except RuntimeError as e:
-            # Handle specific asyncio errors
-            if "cannot schedule new futures after shutdown" in str(e):
-                logger.error("Executor shutdown error - this is likely due to event loop or executor mismanagement")
+            if "cannot schedule new futures after shutdown" in str(e) or "attached to a different loop" in str(e):
+                logger.error(f"Async event loop error: {str(e)}")
                 return {
                     "status": "error",
                     "query": query,
@@ -363,7 +414,6 @@ class ChatManager:
                     "conversation_id": self.conversation_id
                 }
             else:
-                # Re-raise other runtime errors
                 raise
         except Exception as e:
             logger.error(f"Query processing failed: {str(e)}", exc_info=True)
@@ -374,6 +424,7 @@ class ChatManager:
                 "error": str(e),
                 "conversation_id": self.conversation_id
             }
+
 
     async def stream_query(self, query: str, pdf_ids: Optional[List[str]] = None) -> AsyncGenerator[Dict[str, Any], None]:
         """

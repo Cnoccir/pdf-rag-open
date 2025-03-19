@@ -59,6 +59,10 @@ async def process_query(query: str, pdf_ids: List[str] = None) -> Dict[str, Any]
         Dictionary with query analysis results
     """
     try:
+        # Ensure query is a string
+        if not isinstance(query, str):
+            query = str(query)
+
         # Initialize query analysis response
         result = {
             "query": query,
@@ -143,66 +147,76 @@ async def process_query(query: str, pdf_ids: List[str] = None) -> Dict[str, Any]
 def analyze(state: GraphState) -> GraphState:
     """
     Analyze a user query to determine the optimal retrieval strategy.
-
-    Args:
-        state: Current graph state
-
-    Returns:
-        Updated graph state
     """
-    if not state.query_state:
-        logger.error("Query state is required for query analysis")
-        raise ValueError("Query state is required")
+    try:
+        if not state.query_state:
+            logger.error("Query state is required for query analysis")
+            raise ValueError("Query state is required")
 
-    # For now, use basic heuristics to determine retrieval strategy
-    # In a production system, this would use a more sophisticated ML-based approach
-    query = state.query_state.query.lower() if state.query_state.query else ""
+        # For now, use basic heuristics to determine retrieval strategy
+        # Make sure we're accessing query properly
+        if not hasattr(state, 'query_state') or not state.query_state:
+            logger.error("State does not have query_state or it's None")
+            query = ""
+        elif not hasattr(state.query_state, 'query') or not state.query_state.query:
+            logger.error("query_state does not have query attribute or it's None")
+            query = ""
+        else:
+            query = state.query_state.query.lower()
+            logger.debug(f"Processing query: {query}")
 
-    # Detect specific content types
-    focused_elements = []
-    if any(term in query for term in ["table", "row", "column", "cell", "tabular"]):
-        focused_elements.append(ContentType.TABLE)
-        state.query_state.retrieval_strategy = RetrievalStrategy.TABLE
+        # Detect specific content types
+        focused_elements = []
+        if any(term in query for term in ["table", "row", "column", "cell", "tabular"]):
+            focused_elements.append(ContentType.TABLE)
+            state.query_state.retrieval_strategy = RetrievalStrategy.TABLE
 
-    elif any(term in query for term in ["image", "figure", "diagram", "chart", "picture", "photo"]):
-        focused_elements.append(ContentType.FIGURE)
-        state.query_state.retrieval_strategy = RetrievalStrategy.IMAGE
+        elif any(term in query for term in ["image", "figure", "diagram", "chart", "picture", "photo"]):
+            focused_elements.append(ContentType.FIGURE)
+            state.query_state.retrieval_strategy = RetrievalStrategy.IMAGE
 
-    elif any(term in query for term in ["relate", "relationship", "concept", "connection", "between"]):
-        state.query_state.retrieval_strategy = RetrievalStrategy.CONCEPT
+        elif any(term in query for term in ["relate", "relationship", "concept", "connection", "between"]):
+            state.query_state.retrieval_strategy = RetrievalStrategy.CONCEPT
 
-    elif any(term in query for term in ["exact", "specific", "find", "locate", "where"]):
-        state.query_state.retrieval_strategy = RetrievalStrategy.KEYWORD
+        elif any(term in query for term in ["exact", "specific", "find", "locate", "where"]):
+            state.query_state.retrieval_strategy = RetrievalStrategy.KEYWORD
 
-    else:
-        # Default to hybrid retrieval
-        state.query_state.retrieval_strategy = RetrievalStrategy.HYBRID
+        else:
+            # Default to hybrid retrieval
+            state.query_state.retrieval_strategy = RetrievalStrategy.HYBRID
 
-    # Set focused elements
-    state.query_state.focused_elements = focused_elements
+        # Set focused elements
+        state.query_state.focused_elements = focused_elements
 
-    # Extract simple keywords (could be enhanced with NLP)
-    import re
-    words = re.findall(r'\b\w+\b', query)
-    state.query_state.keywords = [word for word in words if len(word) > 3 and word not in [
-        "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
-        "about", "does", "this", "that", "these", "those", "have", "from"
-    ]]
+        # Extract simple keywords (could be enhanced with NLP)
+        import re
+        words = re.findall(r'\b\w+\b', query)
+        state.query_state.keywords = [word for word in words if len(word) > 3 and word not in [
+            "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
+            "about", "does", "this", "that", "these", "those", "have", "from"
+        ]]
 
-    # Set query type based on interrogative words
-    if "how" in query:
-        state.query_state.query_type = "procedural"
-    elif "why" in query:
-        state.query_state.query_type = "explanation"
-    elif "compare" in query or "difference" in query or "versus" in query or "vs" in query:
-        state.query_state.query_type = "comparison"
-    elif any(w in query for w in ["what", "who", "when", "where"]):
-        state.query_state.query_type = "factual"
-    else:
-        state.query_state.query_type = "general"
+        # Set query type based on interrogative words
+        if "how" in query:
+            state.query_state.query_type = "procedural"
+        elif "why" in query:
+            state.query_state.query_type = "explanation"
+        elif "compare" in query or "difference" in query or "versus" in query or "vs" in query:
+            state.query_state.query_type = "comparison"
+        elif any(w in query for w in ["what", "who", "when", "where"]):
+            state.query_state.query_type = "factual"
+        else:
+            state.query_state.query_type = "general"
 
-    # Log analysis results
-    logger.info(f"Query analysis: strategy={state.query_state.retrieval_strategy}, " +
-               f"type={state.query_state.query_type}, elements={focused_elements}")
+        # Log analysis results
+        logger.info(f"Query analysis: strategy={state.query_state.retrieval_strategy}, " +
+                  f"type={state.query_state.query_type}, elements={focused_elements}")
 
-    return state
+        return state
+    except Exception as e:
+        logger.error(f"Error in query analysis: {str(e)}", exc_info=True)
+        # Initialize with default values if something went wrong
+        if state.query_state:
+            state.query_state.retrieval_strategy = RetrievalStrategy.HYBRID
+            state.query_state.query_type = "general"
+        return state

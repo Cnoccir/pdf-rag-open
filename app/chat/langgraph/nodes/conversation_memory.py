@@ -37,7 +37,6 @@ def extract_technical_terms(text: str) -> List[str]:
 
     return list(terms)
 
-
 def process_conversation_memory(state: GraphState) -> GraphState:
     """
     Process conversation memory and extract technical concepts.
@@ -54,6 +53,20 @@ def process_conversation_memory(state: GraphState) -> GraphState:
         from app.chat.langgraph.state import ConversationState
         state.conversation_state = ConversationState()
         logger.info("Initialized new conversation state")
+
+    # Initialize metadata to track processing status
+    if not hasattr(state.conversation_state, "metadata") or not state.conversation_state.metadata:
+        state.conversation_state.metadata = {}
+
+    # Track cycling to prevent infinite loops
+    cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
+    state.conversation_state.metadata["cycle_count"] = cycle_count + 1
+
+    # If we've processed too many cycles, mark as complete to end graph
+    if cycle_count > 5:
+        state.conversation_state.metadata["processed_response"] = True
+        logger.warning(f"Forcing end of processing after {cycle_count} cycles")
+        return state
 
     # If we have a generation_state with response but haven't processed it yet
     if (state.generation_state and state.generation_state.response and
@@ -77,6 +90,8 @@ def process_conversation_memory(state: GraphState) -> GraphState:
 
         # Mark the response as processed
         state.conversation_state.metadata["processed_response"] = True
+        # Reset cycle count after processing
+        state.conversation_state.metadata["cycle_count"] = 0
 
         logger.info(f"Added AI response to conversation history with {len(response_terms)} technical terms")
         return state
@@ -85,7 +100,7 @@ def process_conversation_memory(state: GraphState) -> GraphState:
     if not state.conversation_state.metadata.get("processed_response", False):
         if not any(msg.type == MessageType.SYSTEM for msg in state.conversation_state.messages):
             # Default system prompt if not specified
-            system_prompt = state.conversation_state.system_prompt or (
+            system_prompt = state.conversation_state.system_prompt if hasattr(state.conversation_state, "system_prompt") else (
                 "You are an AI assistant specialized in answering questions about technical documents."
             )
             state.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
@@ -110,13 +125,14 @@ def process_conversation_memory(state: GraphState) -> GraphState:
                     )
 
             # Add the human message to conversation history if not already there
-            # Simple check to avoid duplicates - more robust implementation would check message content
-            if state.conversation_state.messages and state.conversation_state.messages[-1].type == MessageType.USER:
-                if state.conversation_state.messages[-1].content != state.query_state.query:
-                    state.conversation_state.add_message(MessageType.USER, state.query_state.query)
-            else:
-                state.conversation_state.add_message(MessageType.USER, state.query_state.query)
+            # Use message content comparison to avoid duplicates
+            user_messages = [msg for msg in state.conversation_state.messages if msg.type == MessageType.USER]
 
-            logger.info(f"Added human message to conversation history: {state.query_state.query[:50]}...")
+            # Check if this query is already in the messages
+            is_duplicate = any(msg.content == state.query_state.query for msg in user_messages)
+
+            if not is_duplicate:
+                state.conversation_state.add_message(MessageType.USER, state.query_state.query)
+                logger.info(f"Added human message to conversation history: {state.query_state.query[:50]}...")
 
     return state

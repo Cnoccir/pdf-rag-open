@@ -76,10 +76,31 @@ def create_query_graph() -> StateGraph:
     # Define final edge to END state
     def should_end(state: GraphState) -> str:
         """Determine if we should end the graph."""
-        # If we already have a response and have been through conversation_memory twice, end
-        if (state.generation_state and state.generation_state.response and
-            state.conversation_state and state.conversation_state.metadata.get("processed_response", False)):
+        # If we have a response and have processed it, end the graph
+        if (state.generation_state and
+            state.generation_state.response and
+            state.conversation_state and
+            state.conversation_state.metadata and
+            state.conversation_state.metadata.get("processed_response", False)):
             return END
+
+        # Ensure we have conversation state to avoid attribute errors
+        if not state.conversation_state:
+            # End if no conversation state exists
+            return END
+
+        # Enhanced safety check - verify if we've been through this cycle too many times
+        # This helps prevent infinite recursion
+        cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
+        if cycle_count > 5:  # Limit recursion to 5 cycles
+            logger.warning("Ending graph due to excessive cycling")
+            return END
+
+        # Increment cycle count to track recursion
+        if not state.conversation_state.metadata:
+            state.conversation_state.metadata = {}
+        state.conversation_state.metadata["cycle_count"] = cycle_count + 1
+
         return "query_analyzer"
 
     graph.add_conditional_edges(

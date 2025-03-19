@@ -35,7 +35,7 @@ def get_vector_store() -> Neo4jVectorStore:
                 url=neo4j_url,
                 username=neo4j_user,
                 password=neo4j_password,
-                embedding_dimension=embedding_dimension, 
+                embedding_dimension=embedding_dimension,
                 embedding_model="text-embedding-3-small"
             )
 

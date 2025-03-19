@@ -144,33 +144,23 @@ def create_message(conversation_id):
         if conversation.user_id != g.user.id:
             return jsonify({"error": "Unauthorized access to conversation"}), 403
 
-        # Get streaming preference
+        # Get streaming and research mode preferences
         stream_enabled = data.get("useStreaming", data.get("stream", False))
-
-        # Get research mode settings
         use_research = data.get("useResearch", False)
-
-        # Get active document IDs for research mode
         active_docs = data.get("activeDocs", [])
 
-        # If active_docs is provided, update conversation metadata
+        # Update conversation metadata for research mode if active_docs provided
         if use_research and active_docs and len(active_docs) > 1:
             if not conversation.json_metadata:
                 conversation.json_metadata = {}
-
-            # Ensure research_mode key exists
             if "research_mode" not in conversation.json_metadata:
                 conversation.json_metadata["research_mode"] = {}
-
-            # Update research mode data
             conversation.json_metadata["research_mode"]["active"] = True
             conversation.json_metadata["research_mode"]["pdf_ids"] = active_docs
-
-            # Save changes to conversation
             db.session.add(conversation)
             db.session.commit()
 
-        # Add user message to database first
+        # Add the user message to the database
         user_db_message = Message(
             conversation_id=conversation_id,
             role="user",
@@ -181,7 +171,7 @@ def create_message(conversation_id):
 
         logger.info(f"Processing message for conversation {conversation_id}, research mode: {use_research}")
 
-        # Initialize chat manager with correct parameters
+        # Initialize ChatManager with proper arguments
         chat_args = ChatArgs(
             conversation_id=conversation_id,
             pdf_id=str(conversation.pdf_id) if conversation.pdf_id else None,
@@ -189,9 +179,8 @@ def create_message(conversation_id):
             research_mode=ResearchMode.RESEARCH if use_research else ResearchMode.SINGLE
         )
 
-        # Process message based on streaming preference
+        # If streaming is enabled, delegate to the streaming response
         if stream_enabled:
-            # Return streaming response
             return stream_chat_response(
                 conversation_id=conversation_id,
                 user_message=user_message,
@@ -200,54 +189,58 @@ def create_message(conversation_id):
                 active_docs=active_docs
             )
         else:
-            # Process message in current thread with async handler
+            # Process non-streaming query in current thread.
+            chat_manager = ChatManager(chat_args)
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-
             try:
-                # Initialize chat manager
-                chat_manager = ChatManager(chat_args)
-                loop.run_until_complete(chat_manager.initialize())
+                try:
+                    result = loop.run_until_complete(
+                        chat_manager.query(user_message, config={"recursion_limit": 100})
+                    )
+                except TypeError as te:
+                    if "unexpected keyword argument 'config'" in str(te):
+                        logger.warning("ChatManager doesn't accept config parameter, falling back to standard call")
+                        result = loop.run_until_complete(chat_manager.query(user_message))
+                    else:
+                        raise
+            finally:
+                # Clean up async tasks and close the event loop.
+                try:
+                    pending_tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                    if pending_tasks:
+                        for task in pending_tasks:
+                            task.cancel()
+                        loop.run_until_complete(asyncio.gather(*pending_tasks, return_exceptions=True))
+                except Exception as cleanup_err:
+                    logger.error(f"Error cleaning up async tasks: {str(cleanup_err)}")
+                finally:
+                    loop.close()
 
-                # Process the query
-                result = loop.run_until_complete(chat_manager.query(user_message))
+            if "error" in result:
+                logger.error(f"Error in message processing: {result['error']}")
+                return jsonify({"error": result["error"]}), 500
 
-                # Check for errors
-                if "error" in result:
-                    logger.error(f"Error in message processing: {result['error']}")
-                    return jsonify({"error": result["error"]}), 500
-
-                # Add assistant message to database
-                assistant_db_message = Message(
-                    conversation_id=conversation_id,
-                    role="assistant",
-                    content=result["response"],
-                    meta_json={
-                        "citations": result.get("citations", []),
-                        "research_mode": conversation.json_metadata.get("research_mode") if conversation.json_metadata else None
-                    }
-                )
-                db.session.add(assistant_db_message)
-                db.session.commit()
-
-                # Return response
-                return jsonify({
-                    "response": result["response"],
-                    "conversation_id": result["conversation_id"],
+            # Add assistant message to database.
+            assistant_db_message = Message(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=result["response"],
+                meta_json={
                     "citations": result.get("citations", []),
                     "research_mode": conversation.json_metadata.get("research_mode") if conversation.json_metadata else None
-                })
-            finally:
-                # Clean up tasks and close loop
-                try:
-                    tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
-                    if tasks:
-                        for task in tasks:
-                            task.cancel()
-                        loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
-                    loop.close()
-                except Exception as e:
-                    logger.error(f"Error cleaning up async tasks: {str(e)}")
+                }
+            )
+            db.session.add(assistant_db_message)
+            db.session.commit()
+
+            return jsonify({
+                "response": result["response"],
+                "conversation_id": result["conversation_id"],
+                "citations": result.get("citations", []),
+                "research_mode": conversation.json_metadata.get("research_mode") if conversation.json_metadata else None
+            })
+
     except Exception as e:
         logger.error(f"Error processing message: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -576,4 +569,7 @@ async def anext_async_generator(agen, timeout=10.0):
         raise
     except asyncio.TimeoutError:
         logger.warning(f"Timeout waiting for next chunk from stream")
+        raise
+    except Exception as e:
+        logger.error(f"Error in async generator: {str(e)}", exc_info=True)
         raise

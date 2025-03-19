@@ -101,50 +101,74 @@ class Neo4jVectorStore:
         self.metrics = VectorStoreMetrics()
 
     async def initialize_database(self) -> bool:
-        if self.initialized:
-            return True
+        """
+        Initialize the Neo4j database with proper schema and constraints.
+
+        Returns:
+            Success status
+        """
         try:
+            # Create a driver with enhanced connection settings
+            self.driver = AsyncGraphDatabase.driver(
+                self.url,
+                auth=(self.username, self.password),
+                max_connection_lifetime=3600,
+                max_connection_pool_size=50,
+                connection_timeout=30.0,
+                max_retry_time=30.0
+            )
+
+            # Try connecting
             async with self.driver.session(database=self.database) as session:
-                # Test connection.
+                # Test connection
                 result = await session.run("RETURN 1 AS test")
                 record = await result.single()
+
                 if not record or record.get("test") != 1:
-                    logger.error("Database connection test failed")
-                    return False
+                    raise Exception("Failed to connect to Neo4j - database not responding correctly")
 
-                # Check Neo4j version and set index flags accordingly.
+                # Set up constraints
+                await session.run(
+                    "CREATE CONSTRAINT pdf_id_unique IF NOT EXISTS FOR (d:Document) REQUIRE d.pdf_id IS UNIQUE"
+                )
+
+                # Set up indexes
+                await session.run(
+                    "CREATE INDEX document_metadata_index IF NOT EXISTS FOR (d:Document) ON (d.pdf_id, d.title)"
+                )
+
+                # Create vector index if it doesn't exist
                 try:
-                    version_result = await session.run(
-                        "CALL dbms.components() YIELD versions RETURN versions[0] as version"
+                    await session.run(
+                        f"""
+                        CALL db.index.vector.createNodeIndex(
+                            $index_name,
+                            'Content',
+                            'embedding',
+                            $dimension,
+                            'cosine'
+                        )
+                        """,
+                        {"index_name": self.index_name, "dimension": self.embedding_dimension}
                     )
-                    version_record = await version_result.single()
-                    neo4j_version = version_record.get("version", "unknown") if version_record else "unknown"
-                    logger.info(f"Connected to Neo4j version: {neo4j_version}")
-
-                    if neo4j_version.startswith("5."):
-                        indexes_result = await session.run("SHOW INDEXES")
-                        try:
-                            records = await indexes_result.values()
-                        except TypeError:
-                            records = []
-                            while await indexes_result.fetch(1):
-                                records.append(indexes_result.current())
-                    else:
-                        indexes_result = await session.run("CALL db.indexes()")
-                        records = []
-                        while await indexes_result.fetch(1):
-                            records.append(indexes_result.current())
-
-                    self.has_vector_index = any("content_vector" in str(record) for record in records)
-                    self.has_fulltext_index = any("content_fulltext" in str(record) for record in records)
-                    logger.info(f"Index check: vector={self.has_vector_index}, fulltext={self.has_fulltext_index}")
+                    logger.info(f"Created vector index: {self.index_name}")
                 except Exception as e:
-                    logger.warning(f"Could not determine Neo4j version: {str(e)}")
+                    # Check if this is because the index already exists
+                    if "already exists" in str(e):
+                        logger.info(f"Vector index {self.index_name} already exists")
+                    else:
+                        logger.error(f"Error creating vector index: {str(e)}")
+                        raise
 
-                self.initialized = True
-                return True
+            self.initialized = True
+            logger.info(f"Neo4j database initialized successfully with vector index {self.index_name}")
+            return True
+
         except Exception as e:
-            logger.error(f"Database initialization failed: {str(e)}")
+            self.initialized = False
+            self.error = str(e)
+            logger.error(f"Failed to initialize Neo4j database: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
     async def ensure_connection(self, max_retries=3, retry_delay=2.0) -> bool:
@@ -1140,7 +1164,7 @@ class Neo4jVectorStore:
             return []
 
     async def check_health(self) -> Dict[str, Any]:
-        """Check the health status of the Neo4j connection and database."""
+        """Check the health of the Neo4j connection and database."""
         health_info = {
             "status": "unknown",
             "connection": False,
@@ -1148,52 +1172,69 @@ class Neo4jVectorStore:
             "indexes": [],
             "vector_indexes": [],
             "node_counts": {},
-            "last_error": None,
-            "timestamp": datetime.now().isoformat()
+            "error": None,
+            "timestamp": datetime.utcnow().isoformat()
         }
-        if not self.initialized:
-            health_info["status"] = "not_initialized"
-            return health_info
+
         try:
-            connection_result = await self.ensure_connection(max_retries=1)
-            health_info["connection"] = connection_result
-            if not connection_result:
-                health_info["status"] = "connection_failed"
-                return health_info
+            if not self.driver:
+                self.driver = AsyncGraphDatabase.driver(
+                    self.url,
+                    auth=(self.username, self.password)
+                )
+
+            # Check connection
             async with self.driver.session(database=self.database) as session:
-                result = await session.run("SHOW INDEXES")
-                indexes = []
-                async for record in result:
-                    index_info = {
-                        "name": record.get("name", "unknown"),
-                        "type": record.get("type", "unknown"),
-                        "uniqueness": record.get("uniqueness", "unknown"),
-                        "state": record.get("state", "unknown")
-                    }
-                    indexes.append(index_info)
-                    if "vector" in record.get("type", "").lower():
-                        health_info["vector_indexes"].append(index_info)
-                health_info["indexes"] = indexes
-                health_info["database_ready"] = any(idx.get("name") == "content_vector" for idx in indexes)
-                try:
-                    result = await session.run("""
-                        MATCH (n)
-                        WITH labels(n) AS labels, count(n) AS count
-                        RETURN labels, count
-                        ORDER BY count DESC
-                    """)
-                    counts = {}
-                    async for record in result:
-                        label = ":".join(record["labels"]) or "no_label"
-                        counts[label] = record["count"]
-                    health_info["node_counts"] = counts
-                except Exception as count_err:
-                    logger.error(f"Error counting nodes: {str(count_err)}")
-                    health_info["node_counts"] = {"error": str(count_err)}
-                health_info["status"] = "ready" if health_info["database_ready"] else "schema_incomplete"
-                return health_info
+                # Test basic connection
+                result = await session.run("RETURN 1 AS test")
+                record = await result.single()
+                health_info["connection"] = record and record.get("test") == 1
+
+                # Get database info
+                if health_info["connection"]:
+                    # Check if needed indexes exist
+                    result = await session.run("SHOW INDEXES")
+                    records = await result.fetch()
+                    indexes = []
+                    vector_indexes = []
+                    for record in records:
+                        index_info = {
+                            "name": record.get("name"),
+                            "type": record.get("type"),
+                            "label": record.get("labelsOrTypes"),
+                            "properties": record.get("properties")
+                        }
+                        indexes.append(index_info)
+
+                        # Check if this is a vector index
+                        if index_info["type"] == "VECTOR":
+                            vector_indexes.append(index_info)
+
+                    health_info["indexes"] = indexes
+                    health_info["vector_indexes"] = vector_indexes
+
+                    # Check counts of key node types
+                    node_types = ["Document", "Content", "Concept", "Relationship"]
+                    node_counts = {}
+
+                    for node_type in node_types:
+                        result = await session.run(f"MATCH (n:{node_type}) RETURN count(n) as count")
+                        record = await result.single()
+                        if record:
+                            node_counts[node_type] = record.get("count", 0)
+
+                    health_info["node_counts"] = node_counts
+
+                    # Check overall database readiness
+                    health_info["database_ready"] = health_info["connection"] and any(
+                        index["name"] == self.index_name for index in vector_indexes
+                    )
+
+                    health_info["status"] = "healthy" if health_info["database_ready"] else "degraded"
+
         except Exception as e:
             health_info["status"] = "error"
-            health_info["last_error"] = str(e)
-            logger.error(f"Error checking Neo4j health: {str(e)}")
-            return health_info
+            health_info["error"] = str(e)
+            logger.error(f"Error checking database health: {str(e)}")
+
+        return health_info
