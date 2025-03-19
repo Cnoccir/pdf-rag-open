@@ -82,6 +82,7 @@ from app.chat.types import (
     RelationType
 )
 from app.chat.errors import DocumentProcessingError
+from app.chat.vector_stores import get_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -1172,7 +1173,7 @@ class DocumentProcessor:
             # If we have a confident vendor match, return it immediately
             logger.info(f"Predicted vendor-specific category: {vendor_category}")
             return vendor_category
-        
+
         # If no vendor match, try the domain term counter approach
         if self.domain_term_counters:
             # Get the most frequent category based on term counts
@@ -1184,7 +1185,7 @@ class DocumentProcessor:
             if category_counts:
                 # Get the top category
                 top_category = max(category_counts.items(), key=lambda x: x[1])[0]
-                
+
                 # Only use if we have a meaningful number of matches
                 if category_counts[top_category] > 2:
                     # Map to output category name
@@ -1206,14 +1207,14 @@ class DocumentProcessor:
                         "database": "integration",
                         "network": "networking"
                     }
-                    
+
                     mapped_category = doc_type_map.get(top_category, "general")
                     logger.info(f"Predicted category based on domain terms: {mapped_category}")
                     return mapped_category
-        
+
         # Fall back to checking document content for known keywords
         content_lower = content.lower()
-        
+
         # Final check for strong vendor indicators in the content
         if "niagara" in content_lower or "tridium" in content_lower or "jace" in content_lower:
             return "tridium"
@@ -1221,7 +1222,7 @@ class DocumentProcessor:
             return "honeywell"
         if "johnson" in content_lower or "metasys" in content_lower or "jci" in content_lower:
             return "johnson_controls"
-            
+
         # If still no clear category, return general
         return "general"
 
@@ -1311,7 +1312,7 @@ class DocumentProcessor:
         # If we have some matches but not enough for confidence, check some heuristics
         if max(match_counts.values()) > 0:
             best_vendor = max(match_counts.items(), key=lambda x: x[1])[0]
-            
+
             # Check for strong vendor-specific titles
             if "metasys" in content_lower[:500]:  # Check document title/header
                 return "johnson_controls"
@@ -1319,7 +1320,7 @@ class DocumentProcessor:
                 return "tridium"
             if "honeywell" in content_lower[:500]:
                 return "honeywell"
-                
+
             # Some threshold was met, but not enough for high confidence
             logger.info(f"Potential vendor match: {best_vendor} with {match_counts[best_vendor]} indicators (below confidence threshold)")
 
@@ -1436,8 +1437,8 @@ class DocumentProcessor:
                 relationship = ConceptRelationship(
                     source=rel["source"],
                     target=rel["target"],
-                    type=RelationType.map_type(rel["type"]),  # Convert to enum
-                    weight=rel.get("weight", 0.75),
+                    type=RelationType.map_type(rel["relationship_type"]),  # Convert to enum
+                    weight=rel.get("confidence", 0.75),
                     context=rel.get("context", ""),
                     extraction_method=rel.get("extraction_method", "document-based")
                 )
@@ -1505,36 +1506,35 @@ class DocumentProcessor:
         """
         Ingest processed content into Neo4j vector store.
         This is the key connection point between document processing and Neo4j.
-        
+
         Args:
             result: Processing result with elements and concept network
-        
+
         Returns:
             Success status
         """
         logger.info(f"Ingesting processed content to Neo4j for {self.pdf_id}")
-        
+
         try:
             # Get Neo4j vector store
-            from app.chat.vector_stores import get_vector_store
             vector_store = get_vector_store()
-            
+
             # Verify it's initialized
             if not vector_store.initialized:
                 logger.error(f"Neo4j vector store not initialized for {self.pdf_id}")
                 return False
-            
+
             # 1. Create document node first
             document_title = "Untitled Document"
             if hasattr(result, 'document_summary') and result.document_summary:
                 if 'title' in result.document_summary:
                     document_title = result.document_summary['title']
-            
+
             metadata = {
                 "processed_at": datetime.utcnow().isoformat(),
                 "element_count": len(result.elements),
                 "domain_category": self._predict_document_category(
-                    self._extract_all_technical_terms(result.elements), 
+                    self._extract_all_technical_terms(result.elements),
                     result.markdown_content
                 )
             }
@@ -1554,7 +1554,7 @@ class DocumentProcessor:
             # 2. Add content elements with appropriate relationships
             for element in result.elements:
                 await vector_store.add_content_element(element, self.pdf_id)
-            
+
             # 3. Add concepts and their relationships
             if hasattr(result, 'concept_network') and result.concept_network:
                 # Add concepts
@@ -1568,13 +1568,13 @@ class DocumentProcessor:
                             "category": concept.category
                         }
                     )
-                
+
                 # Add relationships between concepts
                 for relationship in result.concept_network.relationships:
                     rel_type = relationship.type
                     if hasattr(rel_type, 'value'):
                         rel_type = rel_type.value
-                    
+
                     await vector_store.add_concept_relationship(
                         source=relationship.source,
                         target=relationship.target,
@@ -1585,7 +1585,7 @@ class DocumentProcessor:
                             "context": relationship.context
                         }
                     )
-                
+
                 # Add section-concept relationships
                 if hasattr(result.concept_network, 'section_concepts'):
                     for section, concepts in result.concept_network.section_concepts.items():
@@ -1595,10 +1595,10 @@ class DocumentProcessor:
                                 concept=concept,
                                 pdf_id=self.pdf_id
                             )
-            
+
             logger.info(f"Successfully ingested content to Neo4j for {self.pdf_id}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to ingest content to Neo4j: {str(e)}", exc_info=True)
             return False
@@ -1712,7 +1712,7 @@ async def process_technical_document(
         ProcessingResult with LangGraph-ready structured content
     """
     logger.info(f"Starting Neo4j-integrated document processing pipeline for {pdf_id}")
-    
+
     # Default config if not provided
     if not config:
         config = ProcessingConfig(
@@ -1726,7 +1726,7 @@ async def process_technical_document(
             extract_relationships=True,
             max_concepts_per_document=200
         )
-    
+
     # Default OpenAI client if not provided
     if not openai_client:
         openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -1741,23 +1741,23 @@ async def process_technical_document(
     try:
         # Process document with Neo4j integration
         result = await processor.process_document()
-        
+
         # Add LangGraph-specific metadata
         if not result.raw_data:
             result.raw_data = {}
-            
+
         result.raw_data["langgraph"] = {
             "node_ready": True,
             "document_structure": processor.section_hierarchy if hasattr(processor, "section_hierarchy") else [],
             "primary_concepts": [c.name for c in processor.concept_network.concepts[:5]] if processor.concept_network and processor.concept_network.concepts else [],
             "technical_domain": processor._predict_document_category(
-                processor._extract_all_technical_terms(result.elements), 
+                processor._extract_all_technical_terms(result.elements),
                 result.markdown_content
             ),
             "processing_timestamp": datetime.utcnow().isoformat(),
             "neo4j_ready": True  # Indicate Neo4j storage is ready
         }
-        
+
         logger.info(
             f"Completed Neo4j-integrated processing for {pdf_id} with "
             f"{len(result.elements)} elements, "

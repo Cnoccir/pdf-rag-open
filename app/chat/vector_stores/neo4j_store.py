@@ -5,6 +5,7 @@ Provides graph-based storage and retrieval with improved connection management.
 
 import os
 import logging
+import time
 import json
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
@@ -12,6 +13,7 @@ from datetime import datetime
 from neo4j import GraphDatabase
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
+from neo4j.exceptions import ServiceUnavailable, AuthError
 
 logger = logging.getLogger(__name__)
 
@@ -631,6 +633,67 @@ class Neo4jVectorStore:
             self.driver = None
             self._initialized = False
             logger.info("Neo4j connection closed")
+
+    async def check_health(self) -> Dict[str, Any]:
+        """
+        Check Neo4j database health and connectivity.
+
+        Returns:
+            Dictionary with health status information
+        """
+        health_info = {
+            "status": "error",
+            "connection": "failed",
+            "database_ready": False,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        if not self.driver or not self._initialized:
+            health_info["error"] = "Neo4j driver not initialized"
+            return health_info
+
+        try:
+            # Test basic connectivity
+            with self.driver.session() as session:
+                # Basic connectivity check
+                result = session.run("RETURN 1 AS n")
+                record = result.single()
+
+                if record and record["n"] == 1:
+                    health_info["connection"] = "connected"
+                    health_info["status"] = "ok"
+                    health_info["database_ready"] = True
+                else:
+                    health_info["error"] = "Database returned unexpected result"
+                    return health_info
+
+            # Check for vector index
+            with self.driver.session() as session:
+                # Check if our embedding index exists
+                try:
+                    # Try to get a content element with embedding to confirm vectors are working
+                    query = """
+                    MATCH (e:ContentElement)
+                    WHERE e.embedding IS NOT NULL
+                    RETURN count(e) AS vector_count
+                    LIMIT 1
+                    """
+
+                    result = session.run(query)
+                    record = result.single()
+
+                    if record and record["vector_count"] > 0:
+                        health_info["has_vectors"] = True
+                    else:
+                        health_info["has_vectors"] = False
+                except Exception as e:
+                    health_info["vector_error"] = str(e)
+
+            return health_info
+
+        except Exception as e:
+            health_info["error"] = str(e)
+            return health_info
 
 # Singleton instance getter
 def get_vector_store() -> Neo4jVectorStore:

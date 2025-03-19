@@ -1,6 +1,5 @@
 """
 Utilities for the LangGraph-based PDF RAG system.
-Modularized for better organization and maintainability.
 """
 
 # Core utilities for document processing
@@ -9,7 +8,7 @@ from .tokenization import (
     OpenAITokenizerWrapper
 )
 
-# Extraction utilities for technical term processing
+# Extraction utilities
 from .extraction import (
     extract_technical_terms,
     extract_concept_relationships,
@@ -18,7 +17,7 @@ from .extraction import (
     RelationType
 )
 
-# Document processing utilities
+# Processing utilities
 from .processing import (
     process_markdown_text,
     create_markdown_chunker,
@@ -27,14 +26,14 @@ from .processing import (
     detect_content_types
 )
 
-# File system utilities
+# Document utilities
 from .document import (
     generate_document_summary,
     create_directory_if_not_exists,
     generate_file_hash
 )
 
-# LangGraph-specific helpers
+# LangGraph helpers
 from .langgraph_helpers import (
     extract_technical_terms_simple,
     format_conversation_for_llm,
@@ -43,33 +42,35 @@ from .langgraph_helpers import (
     create_empty_graph_state
 )
 
-# Setup logging
-def setup_logging(pdf_id: str, output_dir: str = "output") -> None:
-    """
-    Set up logging for document processing.
+# PDF status utilities
+from .pdf_status import (
+    check_pdf_status,
+    get_recent_pdfs
+)
 
-    Args:
-        pdf_id: Document identifier
-        output_dir: Output directory
-    """
-    import logging
-    import os
-    from pathlib import Path
+# Serialization utilities
+from .serialization import (
+    save_json,
+    load_json,
+    create_message_from_dict,
+    serialize_message
+)
 
-    log_dir = Path(output_dir) / pdf_id / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+# Logging setup
+from .logging import (
+    setup_logging,
+    get_processor_metrics
+)
 
-    log_path = log_dir / "processing.log"
-
-    # Configure logger
-    logger = logging.getLogger()
-    handler = logging.FileHandler(log_path)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-
-    # Add handler if it doesn't exist
-    if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(log_path) for h in logger.handlers):
-        logger.addHandler(handler)
+# Async helpers
+from .async_helpers import (
+    with_timeout,
+    run_async,
+    to_async,
+    to_sync,
+    AsyncExecutor,
+    gather_with_concurrency
+)
 
 def validate_content_element_class():
     """
@@ -112,4 +113,4 @@ def validate_content_element_class():
 
     except Exception as e:
         logger.error(f"Error validating ContentElement class: {str(e)}")
-        return False        
+        return False

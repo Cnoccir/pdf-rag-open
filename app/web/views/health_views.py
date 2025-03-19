@@ -3,19 +3,20 @@ Health check endpoints for the application.
 Used for monitoring system health and diagnosing issues.
 """
 
-from flask import Blueprint, jsonify, current_app
+from flask import Blueprint, jsonify, current_app, request
 import logging
 import os
 import platform
 import sys
+import traceback
 from datetime import datetime
 import psutil
-import asyncio
 from typing import Dict, Any
 
 from app.chat.vector_stores import get_vector_store
 from app.web.db import db
-from app.chat.memories.memory_manager import MemoryManager
+from app.web.async_wrapper import async_handler
+from app.chat.utils.pdf_status import check_pdf_status, get_recent_pdfs
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ def database_health():
         }), 500
 
 @bp.route("/vector-store", methods=["GET"])
+@async_handler
 async def vector_store_health():
     """Check Neo4j vector store health."""
     try:
@@ -89,16 +91,7 @@ async def vector_store_health():
         # Check health asynchronously
         health_info = await vector_store.check_health()
 
-        return jsonify({
-            "status": health_info["status"],
-            "connection": health_info["connection"],
-            "database_ready": health_info["database_ready"],
-            "indexes_count": len(health_info["indexes"]),
-            "vector_indexes_count": len(health_info["vector_indexes"]),
-            "node_counts": health_info["node_counts"],
-            "url": vector_store.url.split("@")[-1],  # Hide credentials
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        return jsonify(health_info)
     except Exception as e:
         logger.error(f"Vector store health check failed: {str(e)}")
         return jsonify({
@@ -107,60 +100,36 @@ async def vector_store_health():
             "timestamp": datetime.utcnow().isoformat()
         }), 500
 
-@bp.route("/memory", methods=["GET"])
-async def memory_health():
-    """Check conversation memory health for SQL-based implementation."""
+@bp.route("/pdf/<string:pdf_id>", methods=["GET"])
+@async_handler
+async def check_pdf(pdf_id):
+    """Check status of a specific PDF in the system."""
     try:
-        memory_manager = MemoryManager()
-
-        # Get conversation statistics from the database
-        from app.web.db.models import Conversation, Message
-        from app.web.db import db
-        from sqlalchemy import func
-
-        # Count conversations
-        conversation_count = db.session.query(func.count(Conversation.id)).filter_by(is_deleted=False).scalar() or 0
-
-        # Count deleted conversations
-        deleted_count = db.session.query(func.count(Conversation.id)).filter_by(is_deleted=True).scalar() or 0
-
-        # Count messages
-        message_count = db.session.query(func.count(Message.id)).scalar() or 0
-
-        # Get latest conversation
-        latest_conv = db.session.query(Conversation).filter_by(is_deleted=False).order_by(Conversation.last_updated.desc()).first()
-
-        # Check a random conversation for integrity
-        sample_conversation = None
-        sample_status = "no_conversations"
-
-        if conversation_count > 0:
-            # Get a random conversation ID
-            import random
-
-            conversation_ids = db.session.query(Conversation.id).filter_by(is_deleted=False).limit(10).all()
-            if conversation_ids:
-                sample_id = random.choice(conversation_ids)[0]
-                try:
-                    sample_conversation = await memory_manager.get_conversation(sample_id)
-                    sample_status = "ok" if sample_conversation else "missing"
-                except Exception as e:
-                    sample_status = f"error: {str(e)}"
-
-        return jsonify({
-            "status": "ok",
-            "storage_type": "sql",
-            "conversation_count": conversation_count,
-            "deleted_conversation_count": deleted_count,
-            "message_count": message_count,
-            "latest_conversation": latest_conv.id if latest_conv else None,
-            "latest_update": latest_conv.last_updated.isoformat() if latest_conv else None,
-            "sample_conversation_status": sample_status,
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        # Check PDF status in Neo4j
+        result = await check_pdf_status(pdf_id)
+        return jsonify(result)
     except Exception as e:
-        logger.error(f"Memory health check failed: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error checking PDF status: {str(e)}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "pdf_id": pdf_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
+
+@bp.route("/pdfs/recent", methods=["GET"])
+@async_handler
+async def recent_pdfs():
+    """Get status information for recent PDFs."""
+    try:
+        # Get limit parameter
+        limit = int(request.args.get("limit", "5"))
+
+        # Get recent PDFs status
+        result = await get_recent_pdfs(limit)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error getting recent PDFs: {str(e)}", exc_info=True)
         return jsonify({
             "status": "error",
             "error": str(e),

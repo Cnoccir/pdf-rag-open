@@ -9,7 +9,6 @@ from app.web.hooks import load_logged_in_user, handle_error, add_headers
 from app.web.views import (
     auth_views,
     pdf_views,
-    score_views,
     client_views,
     conversation_views,
     stream_views,
@@ -126,7 +125,6 @@ def register_extensions(app):
 def register_blueprints(app):
     app.register_blueprint(auth_views.bp)
     app.register_blueprint(pdf_views.bp)
-    app.register_blueprint(score_views.bp)
     app.register_blueprint(conversation_views.bp)
     app.register_blueprint(client_views.bp)
     app.register_blueprint(health_views.bp) #Register the health view
