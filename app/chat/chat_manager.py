@@ -1,40 +1,29 @@
 """
-LangGraph-based ChatManager for the PDF RAG system.
-This class serves as the main entry point for the chat functionality.
+Simplified ChatManager for the PDF RAG system.
+Uses LangGraph for workflow and improves async/sync handling.
 """
 
 import logging
-import asyncio
-from typing import Dict, List, Any, Optional, Union, AsyncGenerator
+from typing import Dict, List, Any, Optional, Generator, AsyncGenerator
 from datetime import datetime
 import uuid
-import traceback
+import time
 
-from app.chat.types import ChatArgs, ContentType, ResearchMode, ResearchContext
+from app.chat.types import ChatArgs, ResearchMode
 from app.chat.langgraph.state import GraphState, QueryState, MessageType, ConversationState
-from app.chat.langgraph.graph import create_query_graph, create_document_graph, create_research_graph
+from app.chat.langgraph.graph import create_query_graph, create_research_graph, create_document_graph
 from app.chat.memories.memory_manager import MemoryManager
 from app.chat.vector_stores import get_vector_store
-from langgraph.errors import GraphRecursionError
 
 logger = logging.getLogger(__name__)
-
 
 class ChatManager:
     """
     ChatManager implementing LangGraph-based architecture for PDF RAG system.
-
-    This class orchestrates the document processing and query answering workflow
-    using the LangGraph architecture for flexibility and modularity.
-
-    Features:
-    - Document processing with hierarchical understanding
-    - Query analysis with dynamic retrieval strategy selection
-    - Research mode for cross-document analysis
-    - Streaming support for interactive responses
-    - Conversation history tracking
+    Simplified implementation with improved async/sync handling.
     """
 
+    # System prompts
     BASE_SYSTEM_PROMPT = """You are an AI assistant specialized in providing information about technical documentation.
     Your goal is to give accurate, clear answers using only the provided context information. Be detailed and precise.
     If you don't know an answer or if the information isn't in the context, simply acknowledge that you don't have that information
@@ -48,10 +37,10 @@ class ChatManager:
 
     def __init__(self, chat_args: ChatArgs):
         """
-        Initialize the ChatManager with the provided arguments.
+        Initialize ChatManager with the provided arguments.
 
         Args:
-            chat_args: Chat configuration arguments
+            chat_args: Chat configuration
         """
         self.chat_args = chat_args
         self.conversation_id = getattr(chat_args, "conversation_id", None)
@@ -60,57 +49,67 @@ class ChatManager:
         self.stream_enabled = getattr(chat_args, "stream_enabled", False)
         self.stream_chunk_size = getattr(chat_args, "stream_chunk_size", 20)
 
-        # Initialize memory manager
-        self.memory_manager = MemoryManager()
-
         # Initialize conversation state
         self.conversation_state = None
 
-        # Create LangGraph instances
-        self.query_graph = create_query_graph()
-        self.document_graph = create_document_graph()
-        self.research_graph = create_research_graph()
+        # Initialize memory manager
+        self.memory_manager = MemoryManager()
 
-        # Initialize Neo4j connection status
-        self.neo4j_initialized = False
+        # Create LangGraph instances - don't compile until needed
+        self._query_graph = None
+        self._research_graph = None
+        self._document_graph = None
+
+        # Initialize vector store connection status
+        self.vector_store_ready = False
 
         logger.info(f"ChatManager initialized with PDF ID: {self.pdf_id}, "
                    f"Conversation ID: {self.conversation_id}, "
                    f"Research Mode: {self.research_mode}")
 
-    async def initialize(self) -> None:
-        """
-        Initialize the ChatManager by loading conversation history and initializing Neo4j.
-        """
-        # Initialize Neo4j store
-        try:
-            vector_store = get_vector_store()
-            if not vector_store.initialized:
-                logger.warning("Neo4j vector store not initialized, initializing...")
-                await vector_store.initialize_database()
-                self.neo4j_initialized = True
-            else:
-                self.neo4j_initialized = True
+    def _get_query_graph(self):
+        """Get or create query graph"""
+        if not self._query_graph:
+            self._query_graph = create_query_graph()
+        return self._query_graph
 
-            logger.info("Vector store initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing vector store: {str(e)}")
-            logger.error(traceback.format_exc())
-            self.neo4j_initialized = False
+    def _get_research_graph(self):
+        """Get or create research graph"""
+        if not self._research_graph:
+            self._research_graph = create_research_graph()
+        return self._research_graph
+
+    def _get_document_graph(self):
+        """Get or create document graph"""
+        if not self._document_graph:
+            self._document_graph = create_document_graph()
+        return self._document_graph
+
+    def initialize(self):
+        """
+        Initialize the ChatManager by loading conversation history and checking vector store.
+        """
+        # Check vector store readiness
+        vector_store = get_vector_store()
+        self.vector_store_ready = vector_store._initialized
+
+        if not self.vector_store_ready:
+            logger.warning("Vector store not initialized, attempting to initialize...")
+            self.vector_store_ready = vector_store.initialize()
 
         # Load conversation history
         if self.conversation_id:
             # Load conversation from memory manager
-            self.conversation_state = await self.memory_manager.get_conversation(self.conversation_id)
+            self.conversation_state = self.memory_manager.get_conversation(self.conversation_id)
 
             if self.conversation_state:
                 logger.info(f"Loaded conversation {self.conversation_id} with "
-                           f"{len(self.conversation_state.messages)} messages")
+                          f"{len(self.conversation_state.messages)} messages")
 
                 # Check if research mode is active in conversation metadata
-                if self.conversation_state.metadata and self.conversation_state.metadata.get("research_mode"):
-                    research_metadata = self.conversation_state.metadata.get("research_mode")
-                    if research_metadata.get("active", False) and len(research_metadata.get("pdf_ids", [])) > 1:
+                if self.conversation_state.metadata and "research_mode" in self.conversation_state.metadata:
+                    research_metadata = self.conversation_state.metadata["research_mode"]
+                    if isinstance(research_metadata, dict) and research_metadata.get("active", False):
                         # Override research mode from args if metadata indicates it's active
                         self.research_mode = ResearchMode.RESEARCH
                         logger.info("Research mode activated from conversation metadata")
@@ -122,11 +121,11 @@ class ChatManager:
                         "active": self.research_mode == ResearchMode.RESEARCH,
                         "pdf_ids": [self.pdf_id] if self.pdf_id else []
                     },
-                    "created_at": datetime.utcnow().isoformat()
+                    "created_at": datetime.now().isoformat()
                 }
 
-                self.conversation_state = await self.memory_manager.create_conversation(
-                    title=f"Conversation about {self.pdf_id}" if self.pdf_id else f"New Conversation",
+                self.conversation_state = self.memory_manager.create_conversation(
+                    title=f"Conversation about {self.pdf_id}" if self.pdf_id else "New Conversation",
                     pdf_id=self.pdf_id,
                     metadata=metadata,
                     id=self.conversation_id
@@ -151,11 +150,11 @@ class ChatManager:
                     "active": self.research_mode == ResearchMode.RESEARCH,
                     "pdf_ids": [self.pdf_id] if self.pdf_id else []
                 },
-                "created_at": datetime.utcnow().isoformat()
+                "created_at": datetime.now().isoformat()
             }
 
-            self.conversation_state = await self.memory_manager.create_conversation(
-                title=f"Conversation about {self.pdf_id}" if self.pdf_id else f"New Conversation",
+            self.conversation_state = self.memory_manager.create_conversation(
+                title=f"Conversation about {self.pdf_id}" if self.pdf_id else "New Conversation",
                 pdf_id=self.pdf_id,
                 metadata=metadata,
                 id=self.conversation_id
@@ -166,17 +165,7 @@ class ChatManager:
             if self.research_mode == ResearchMode.RESEARCH:
                 system_prompt = f"{self.BASE_SYSTEM_PROMPT}\n\n{self.RESEARCH_MODE_PROMPT}"
 
-            # Ensure conversation_state is valid before adding messages
-            if self.conversation_state:
-                self.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
-            else:
-                # If conversation state creation failed, create one locally
-                from app.chat.langgraph.state import ConversationState
-                self.conversation_state = ConversationState(
-                    conversation_id=self.conversation_id,
-                    title=f"Conversation about {self.pdf_id}" if self.pdf_id else f"New Conversation"
-                )
-                self.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
+            self.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
 
             logger.info(f"Generated new conversation ID: {self.conversation_id}")
 
@@ -194,42 +183,43 @@ class ChatManager:
                     "pdf_ids": [self.pdf_id] if self.pdf_id else []
                 }
 
-    async def process_document(self, pdf_id: str) -> Dict[str, Any]:
+    def process_document(self, pdf_id: str) -> Dict[str, Any]:
         """
         Process a document using the document processing graph.
 
         Args:
-            pdf_id: ID of the PDF to process
+            pdf_id: Document ID to process
 
         Returns:
-            Document processing results
+            Processing results
         """
         logger.info(f"Processing document: {pdf_id}")
 
-        # Ensure Neo4j is initialized
-        if not self.neo4j_initialized:
-            try:
-                vector_store = get_vector_store()
-                await vector_store.initialize_database()
-                self.neo4j_initialized = True
-                logger.info("Initialized Neo4j for document processing")
-            except Exception as e:
-                logger.error(f"Error initializing Neo4j: {str(e)}")
-                self.neo4j_initialized = False
-                return {
-                    "status": "error",
-                    "pdf_id": pdf_id,
-                    "error": f"Neo4j initialization failed: {str(e)}"
-                }
+        # Ensure vector store is ready
+        if not self.vector_store_ready:
+            vector_store = get_vector_store()
+            self.vector_store_ready = vector_store.initialize()
 
-        # Create initial state for document processing
+        if not self.vector_store_ready:
+            logger.error("Vector store initialization failed")
+            return {
+                "status": "error",
+                "pdf_id": pdf_id,
+                "error": "Vector store initialization failed"
+            }
+
+        # Create initial state
         state = GraphState(
             document_state={"pdf_id": pdf_id}
         )
 
-        # Execute the document processing graph
         try:
-            result = await self.document_graph.ainvoke(state)
+            # Get document graph
+            document_graph = self._get_document_graph()
+
+            # Process document
+            result = document_graph.invoke(state)
+
             logger.info(f"Document processing complete for: {pdf_id}")
             return {
                 "status": "success",
@@ -245,98 +235,56 @@ class ChatManager:
                 "error": str(e)
             }
 
-    async def query(self, query: str, pdf_ids: Optional[List[str]] = None, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def query(self, query: str, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        Process a query using the appropriate LangGraph.
+        Process a query using LangGraph.
 
         Args:
-            query: User query
-            pdf_ids: Optional list of PDF IDs to search
-            config: Optional configuration for LangGraph processing
+            query: User query text
+            pdf_ids: Optional list of PDF IDs to query
 
         Returns:
             Query results
         """
-        if self.stream_enabled:
-            # Collect all chunks for a complete response
-            chunks = []
-            final_response = None
-
-            async for chunk in self.stream_query(query, pdf_ids):
-                if "status" in chunk and chunk["status"] == "complete":
-                    final_response = chunk
-                elif "chunk" in chunk:
-                    chunks.append(chunk["chunk"])
-
-            if final_response:
-                return final_response
-            else:
-                # Build response from chunks
-                return {
-                    "response": "".join(chunks),
-                    "conversation_id": self.conversation_id
-                }
-        else:
-            # Process as non-streaming query
-            # Pass the config parameter to aquery
-            return await self.aquery(query, pdf_ids, config=config)
-
-    async def query(self, query: str, pdf_ids: Optional[List[str]] = None, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Process a query using the appropriate LangGraph.
-
-        Args:
-            query: User query
-            pdf_ids: Optional list of PDF IDs to search
-            config: Optional configuration for LangGraph processing
-
-        Returns:
-            Query results
-        """
-        if self.stream_enabled:
-            # Collect all chunks for a complete response
-            chunks = []
-            final_response = None
-
-            async for chunk in self.stream_query(query, pdf_ids):
-                if "status" in chunk and chunk["status"] == "complete":
-                    final_response = chunk
-                elif "chunk" in chunk:
-                    chunks.append(chunk["chunk"])
-
-            if final_response:
-                return final_response
-            else:
-                # Build response from chunks
-                return {
-                    "response": "".join(chunks),
-                    "conversation_id": self.conversation_id
-                }
-        else:
-            # Process as non-streaming query.
-            # Pass the config parameter to aquery.
-            return await self.aquery(query, pdf_ids, config=config)
-
-
-    async def aquery(self, query: str, pdf_ids: Optional[List[str]] = None, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         logger.info(f"Processing query: {query}")
 
-        # Use the PDF ID from init if not provided.
+        # Initialize if needed
+        if not self.conversation_state:
+            self.initialize()
+
+        # Use the PDF ID from init if not provided
         if not pdf_ids and self.pdf_id:
             pdf_ids = [self.pdf_id]
 
-        # Get PDF IDs from conversation metadata if in research mode.
+        # Get PDF IDs from conversation metadata if in research mode
         if self.research_mode == ResearchMode.RESEARCH and self.conversation_state and self.conversation_state.metadata:
             research_mode = self.conversation_state.metadata.get("research_mode", {})
-            if research_mode.get("active") and research_mode.get("pdf_ids"):
+            if isinstance(research_mode, dict) and research_mode.get("active") and research_mode.get("pdf_ids"):
                 pdf_ids = research_mode.get("pdf_ids")
                 logger.info(f"Using PDF IDs from research mode metadata: {pdf_ids}")
 
-        # Initialize conversation state if needed.
-        if not self.conversation_state:
-            await self.initialize()
+        # Check if streaming is requested
+        if self.stream_enabled:
+            # For streaming, collect all chunks
+            chunks = []
+            final_response = None
 
-        # Create initial state.
+            for chunk in self.stream_query(query, pdf_ids):
+                if "status" in chunk and chunk["status"] == "complete":
+                    final_response = chunk
+                elif "chunk" in chunk:
+                    chunks.append(chunk["chunk"])
+
+            if final_response:
+                return final_response
+            else:
+                # Build response from chunks
+                return {
+                    "response": "".join(chunks),
+                    "conversation_id": self.conversation_id
+                }
+
+        # Create initial state
         state = GraphState(
             query_state=QueryState(
                 query=query,
@@ -345,79 +293,49 @@ class ChatManager:
             conversation_state=self.conversation_state
         )
 
-        # Choose the appropriate graph based on research mode.
-        graph = self.research_graph if self.research_mode in [ResearchMode.RESEARCH, ResearchMode.MULTI] else self.query_graph
-
-        # Set default config if not provided.
-        if config is None:
-            config = {"recursion_limit": 100}  # Default recursion limit
+        # Choose the appropriate graph based on research mode
+        graph = self._get_research_graph() if self.research_mode == ResearchMode.RESEARCH else self._get_query_graph()
 
         try:
-            # Ensure Neo4j is initialized.
-            if not self.neo4j_initialized:
-                try:
-                    vector_store = get_vector_store()
-                    if not vector_store.initialized:
-                        await vector_store.initialize_database()
-                    self.neo4j_initialized = True
-                    logger.info("Initialized Neo4j for query processing")
-                except Exception as e:
-                    logger.error(f"Error initializing Neo4j: {str(e)}")
-                    self.neo4j_initialized = False
+            # Ensure vector store is ready
+            if not self.vector_store_ready:
+                vector_store = get_vector_store()
+                self.vector_store_ready = vector_store.initialize()
+
+                if not self.vector_store_ready:
                     return {
                         "status": "error",
                         "query": query,
-                        "error": f"Neo4j initialization failed: {str(e)}",
+                        "error": "Vector store initialization failed",
                         "conversation_id": self.conversation_id
                     }
 
-            # Run LangGraph with the provided config.
-            result = await graph.ainvoke(state, config)
+            # Run LangGraph
+            result = graph.invoke(state)
 
-            # Update conversation state from result.
+            # Update conversation state
             if result.conversation_state:
                 self.conversation_state = result.conversation_state
 
-                # Save updated conversation.
-                await self.memory_manager.save_conversation(self.conversation_state)
+                # Save updated conversation
+                self.memory_manager.save_conversation(self.conversation_state)
                 logger.info(f"Saved conversation with {len(self.conversation_state.messages)} messages")
 
-            # Prepare response.
+            # Prepare response
             response = {
                 "query": query,
                 "response": result.generation_state.response if result.generation_state else None,
                 "citations": result.generation_state.citations if result.generation_state and hasattr(result.generation_state, "citations") else [],
                 "pdf_ids": pdf_ids or [],
                 "conversation_id": self.conversation_id,
-                "research_mode": (self.conversation_state.metadata.get("research_mode")
-                                  if self.conversation_state and self.conversation_state.metadata else None)
+                "research_mode": self.conversation_state.metadata.get("research_mode") if self.conversation_state and self.conversation_state.metadata else None
             }
 
-            logger.info(f"Query processing complete, response length: {len(response['response']) if response['response'] else 0}")
+            logger.info(f"Query processing complete, response length: {len(response['response']) if response.get('response') else 0}")
             return response
 
-        except GraphRecursionError as e:
-            logger.error(f"Graph recursion limit reached: {str(e)}")
-            return {
-                "status": "error",
-                "query": query,
-                "error": "The processing graph reached its recursion limit. This is likely due to an internal configuration issue.",
-                "conversation_id": self.conversation_id
-            }
-        except RuntimeError as e:
-            if "cannot schedule new futures after shutdown" in str(e) or "attached to a different loop" in str(e):
-                logger.error(f"Async event loop error: {str(e)}")
-                return {
-                    "status": "error",
-                    "query": query,
-                    "error": "Internal execution error. Please try your query again.",
-                    "conversation_id": self.conversation_id
-                }
-            else:
-                raise
         except Exception as e:
             logger.error(f"Query processing failed: {str(e)}", exc_info=True)
-            logger.error(traceback.format_exc())
             return {
                 "status": "error",
                 "query": query,
@@ -425,14 +343,13 @@ class ChatManager:
                 "conversation_id": self.conversation_id
             }
 
-
-    async def stream_query(self, query: str, pdf_ids: Optional[List[str]] = None) -> AsyncGenerator[Dict[str, Any], None]:
+    def stream_query(self, query: str, pdf_ids: Optional[List[str]] = None) -> Generator[Dict[str, Any], None, None]:
         """
         Stream a query response.
 
         Args:
-            query: User query
-            pdf_ids: Optional list of PDF IDs to search
+            query: User query text
+            pdf_ids: Optional list of PDF IDs to query
 
         Yields:
             Streaming query results
@@ -454,13 +371,35 @@ class ChatManager:
             # Get PDF IDs from conversation metadata if in research mode
             if self.research_mode == ResearchMode.RESEARCH and self.conversation_state and self.conversation_state.metadata:
                 research_mode = self.conversation_state.metadata.get("research_mode", {})
-                if research_mode.get("active") and research_mode.get("pdf_ids"):
+                if isinstance(research_mode, dict) and research_mode.get("active") and research_mode.get("pdf_ids"):
                     pdf_ids = research_mode.get("pdf_ids")
                     logger.info(f"Using PDF IDs from research mode metadata: {pdf_ids}")
 
             # Initialize if needed
             if not self.conversation_state:
-                await self.initialize()
+                self.initialize()
+
+            # Ensure vector store is ready
+            if not self.vector_store_ready:
+                yield {
+                    "status": "processing",
+                    "message": "Initializing vector database..."
+                }
+
+                vector_store = get_vector_store()
+                self.vector_store_ready = vector_store.initialize()
+
+                if self.vector_store_ready:
+                    yield {
+                        "status": "processing",
+                        "message": "Vector database ready, processing your query..."
+                    }
+                else:
+                    yield {
+                        "status": "error",
+                        "error": "Vector store initialization failed"
+                    }
+                    return
 
             # Create initial state
             state = GraphState(
@@ -471,161 +410,119 @@ class ChatManager:
                 conversation_state=self.conversation_state
             )
 
-            # Choose the appropriate graph based on research mode
-            graph = self.research_graph if self.research_mode in [ResearchMode.RESEARCH, ResearchMode.MULTI] else self.query_graph
+            # Add the user message to conversation state
+            if self.conversation_state:
+                self.conversation_state.add_message(MessageType.USER, query)
 
-            # Ensure Neo4j is initialized
-            if not self.neo4j_initialized:
+                # Reset cycle count
+                if not self.conversation_state.metadata:
+                    self.conversation_state.metadata = {}
+                self.conversation_state.metadata["cycle_count"] = 0
+                self.conversation_state.metadata["processed_response"] = False
+
+            # Choose the appropriate graph
+            graph = self._get_research_graph() if self.research_mode == ResearchMode.RESEARCH else self._get_query_graph()
+
+            # Create string buffer for accumulating response
+            accumulated_response = ""
+
+            # Process steps
+            if self.research_mode == ResearchMode.RESEARCH:
+                steps = [
+                    ("query_analyzer", "Analyzing query..."),
+                    ("retriever", "Searching across documents..."),
+                    ("research_synthesizer", "Synthesizing information..."),
+                    ("knowledge_generator", "Generating insights..."),
+                    ("response_generator", "Creating response...")
+                ]
+            else:
+                steps = [
+                    ("query_analyzer", "Analyzing query..."),
+                    ("retriever", "Searching documents..."),
+                    ("knowledge_generator", "Processing information..."),
+                    ("response_generator", "Creating response...")
+                ]
+
+            # Run graph with manual stepping for streaming
+            current_state = state
+            for node_name, status_message in steps:
+                # Yield status update
+                yield {
+                    "status": "processing",
+                    "message": status_message
+                }
+
+                # Run the current node
                 try:
-                    yield {
-                        "status": "processing",
-                        "message": "Initializing vector database..."
-                    }
+                    next_node = graph.get_node(node_name)
+                    current_state = next_node(current_state)
 
-                    vector_store = get_vector_store()
-                    if not vector_store.initialized:
-                        await vector_store.initialize_database()
-                    self.neo4j_initialized = True
+                    # Check if we have a generated response
+                    if (node_name == "response_generator" and
+                        current_state.generation_state and
+                        current_state.generation_state.response):
 
-                    yield {
-                        "status": "processing",
-                        "message": "Vector database ready, processing your query..."
-                    }
-                except Exception as e:
-                    logger.error(f"Error initializing Neo4j: {str(e)}")
-                    self.neo4j_initialized = False
+                        response = current_state.generation_state.response
+
+                        # Stream in chunks
+                        for i in range(0, len(response), self.stream_chunk_size):
+                            chunk = response[i:i+self.stream_chunk_size]
+                            accumulated_response += chunk
+
+                            yield {
+                                "type": "stream",
+                                "chunk": chunk,
+                                "index": i // self.stream_chunk_size,
+                                "is_complete": False
+                            }
+
+                            # Add a small delay for smoother streaming
+                            time.sleep(0.05)
+
+                except Exception as node_error:
+                    logger.error(f"Error in {node_name} node: {str(node_error)}")
                     yield {
                         "status": "error",
-                        "error": f"Neo4j initialization failed: {str(e)}"
+                        "error": f"Error in processing: {str(node_error)}"
                     }
                     return
 
-            # Execute graph with event handlers for streaming
+            # Complete conversation processing
             try:
-                # Create a string buffer for response chunks
-                accumulated_response = ""
+                # Add the assistant message to conversation state
+                if (self.conversation_state and
+                    current_state.generation_state and
+                    current_state.generation_state.response):
 
-                # Define callback that will be called as the graph runs
-                async def on_graph_state_change(event_data: Dict[str, Any]) -> None:
-                    nonlocal accumulated_response
+                    self.conversation_state.add_message(
+                        MessageType.ASSISTANT,
+                        current_state.generation_state.response,
+                        {"citations": current_state.generation_state.citations if hasattr(current_state.generation_state, "citations") else []}
+                    )
 
-                    # Extract relevant data about current state
-                    state_type = event_data.get("type", "none")
-                    node_name = event_data.get("node_name", "")
-                    state = event_data.get("state", {})
+                    # Mark response as processed
+                    if not self.conversation_state.metadata:
+                        self.conversation_state.metadata = {}
+                    self.conversation_state.metadata["processed_response"] = True
 
-                    if state_type == "on_node_start":
-                        # Node starting - provide progress update
-                        if node_name == "retriever":
-                            yield {
-                                "status": "processing",
-                                "message": "Retrieving relevant information..."
-                            }
-                        elif node_name == "knowledge_generator":
-                            yield {
-                                "status": "processing",
-                                "message": "Analyzing documents..."
-                            }
-                        elif node_name == "research_synthesizer" and self.research_mode == ResearchMode.RESEARCH:
-                            yield {
-                                "status": "processing",
-                                "message": "Synthesizing across documents..."
-                            }
-                        elif node_name == "response_generator":
-                            yield {
-                                "status": "processing",
-                                "message": "Generating response..."
-                            }
+                    # Save conversation
+                    self.memory_manager.save_conversation(self.conversation_state)
+            except Exception as save_error:
+                logger.error(f"Error saving conversation: {str(save_error)}")
 
-                    elif state_type == "on_node_end" and node_name == "response_generator":
-                        # Response is being generated - stream it in chunks
-                        if state and hasattr(state, "generation_state") and state.generation_state:
-                            response = state.generation_state.response
-
-                            if response and response != accumulated_response:
-                                # Only send the new part
-                                new_content = response[len(accumulated_response):]
-
-                                # Break into smaller chunks for smoother streaming
-                                chunk_size = self.stream_chunk_size
-                                for i in range(0, len(new_content), chunk_size):
-                                    chunk = new_content[i:i+chunk_size]
-                                    is_last_chunk = (i + chunk_size) >= len(new_content)
-
-                                    yield {
-                                        "chunk": chunk,
-                                        "index": (len(accumulated_response) + i) // chunk_size,
-                                        "is_complete": False
-                                    }
-
-                                # Update accumulated response
-                                accumulated_response = response
-
-                    elif state_type == "on_chain_end":
-                        # End of graph execution - return final response
-                        if state and hasattr(state, "generation_state") and state.generation_state:
-                            # Save conversation state
-                            if hasattr(state, "conversation_state") and state.conversation_state:
-                                self.conversation_state = state.conversation_state
-                                await self.memory_manager.save_conversation(self.conversation_state)
-
-                            # Get citations from the state
-                            citations = []
-                            if hasattr(state.generation_state, "citations"):
-                                citations = state.generation_state.citations
-
-                            # Send final complete response
-                            yield {
-                                "status": "complete",
-                                "response": state.generation_state.response,
-                                "conversation_id": self.conversation_id,
-                                "citations": citations
-                            }
-
-                # Create callback handler that will send chunks through our generator
-                async def callback_handler(event_data: Dict[str, Any]) -> None:
-                    async for chunk in on_graph_state_change(event_data):
-                        yield chunk
-
-                # Set up callbacks
-                callbacks = {"on_state_change": callback_handler}
-
-                # Run graph with callbacks
-                result_iterator = await graph.astream(state, callbacks)
-
-                # Process all events from graph
-                async for chunk_generator in result_iterator:
-                    async for chunk in chunk_generator:
-                        yield chunk
-
-                # Ensure we have a final state in case callbacks missed it
-                async for event in result_iterator:
-                    if event.get("type") == "on_chain_end":
-                        state = event.get("state")
-                        if state and state.generation_state:
-                            # Final sanity check - make sure we send complete response
-                            yield {
-                                "status": "complete",
-                                "response": state.generation_state.response,
-                                "conversation_id": self.conversation_id,
-                                "citations": state.generation_state.citations if hasattr(state.generation_state, "citations") else []
-                            }
-                            break
-
-            except Exception as e:
-                logger.error(f"Error in stream processing: {str(e)}", exc_info=True)
-                yield {
-                    "status": "error",
-                    "error": str(e)
-                }
+            # Send final complete message
+            yield {
+                "status": "complete",
+                "response": current_state.generation_state.response if current_state.generation_state else accumulated_response,
+                "conversation_id": self.conversation_id,
+                "citations": current_state.generation_state.citations if current_state.generation_state and hasattr(current_state.generation_state, "citations") else []
+            }
 
         except Exception as e:
-            logger.error(f"Stream query processing failed: {str(e)}", exc_info=True)
-            logger.error(traceback.format_exc())
+            logger.error(f"Error in stream processing: {str(e)}", exc_info=True)
             yield {
                 "status": "error",
-                "error": str(e),
-                "conversation_id": self.conversation_id
+                "error": str(e)
             }
 
     def get_conversation_history(self) -> List[Dict[str, Any]]:
@@ -644,10 +541,11 @@ class ChatManager:
             if msg.type == MessageType.SYSTEM:
                 continue
 
+            # Format message
             history.append({
                 "role": "user" if msg.type == MessageType.USER else "assistant",
                 "content": msg.content,
-                "timestamp": msg.created_at.isoformat() if hasattr(msg.created_at, 'isoformat') else str(msg.created_at),
+                "timestamp": msg.created_at.isoformat() if hasattr(msg.created_at, "isoformat") else str(msg.created_at),
                 "message_id": msg.id if hasattr(msg, "id") else None,
                 "metadata": msg.metadata or {}
             })
@@ -665,31 +563,36 @@ class ChatManager:
             return False
 
         # Delete from memory manager
-        self.memory_manager.delete_conversation(self.conversation_id)
+        success = self.memory_manager.delete_conversation(self.conversation_id)
 
-        # Reset conversation state
-        metadata = {
-            "pdf_id": self.pdf_id,
-            "research_mode": {
-                "active": self.research_mode == ResearchMode.RESEARCH,
-                "pdf_ids": [self.pdf_id] if self.pdf_id else []
-            },
-            "created_at": datetime.utcnow().isoformat()
-        }
+        if success:
+            # Reset conversation state
+            metadata = {
+                "pdf_id": self.pdf_id,
+                "research_mode": {
+                    "active": self.research_mode == ResearchMode.RESEARCH,
+                    "pdf_ids": [self.pdf_id] if self.pdf_id else []
+                },
+                "created_at": datetime.now().isoformat()
+            }
 
-        self.conversation_state = ConversationState(
-            conversation_id=self.conversation_id,
-            title=f"Conversation about {self.pdf_id}" if self.pdf_id else f"New Conversation",
-            pdf_id=self.pdf_id or "",
-            metadata=metadata
-        )
+            self.conversation_state = ConversationState(
+                conversation_id=self.conversation_id,
+                title=f"Conversation about {self.pdf_id}" if self.pdf_id else "New Conversation",
+                pdf_id=self.pdf_id or "",
+                metadata=metadata
+            )
 
-        # Add system message
-        system_prompt = self.BASE_SYSTEM_PROMPT
-        if self.research_mode == ResearchMode.RESEARCH:
-            system_prompt = f"{self.BASE_SYSTEM_PROMPT}\n\n{self.RESEARCH_MODE_PROMPT}"
+            # Add system message
+            system_prompt = self.BASE_SYSTEM_PROMPT
+            if self.research_mode == ResearchMode.RESEARCH:
+                system_prompt = f"{self.BASE_SYSTEM_PROMPT}\n\n{self.RESEARCH_MODE_PROMPT}"
 
-        self.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
+            self.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
 
-        logger.info(f"Cleared conversation {self.conversation_id}")
-        return True
+            # Save the new conversation
+            self.memory_manager.save_conversation(self.conversation_state)
+
+            logger.info(f"Cleared conversation {self.conversation_id}")
+
+        return success

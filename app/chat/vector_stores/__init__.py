@@ -6,6 +6,7 @@ This module provides a single point of access to Neo4j vector storage.
 import os
 import logging
 from typing import Optional
+import traceback
 
 from app.chat.vector_stores.neo4j_store import Neo4jVectorStore
 

@@ -1,22 +1,19 @@
 """
-Enhanced response generator node for LangGraph-based PDF RAG system.
-Generates comprehensive responses with improved citations and research insights.
+Response generator node for LangGraph-based PDF RAG system.
+Generates comprehensive responses with citations from retrieved content.
 """
 
 import logging
 import os
-import asyncio
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List
 from datetime import datetime
-import traceback
-
 from openai import OpenAI
-from app.chat.langgraph.state import RetrievalState, GraphState, GenerationState, ResearchState
-from app.chat.types import ContentElement
+
+from app.chat.langgraph.state import GraphState, GenerationState
 
 logger = logging.getLogger(__name__)
 
-# Enhanced response generation prompt template for single document
+# Response generation prompt template for single document
 RESPONSE_GENERATION_PROMPT = """
 You are an AI assistant specialized in answering queries about technical documents.
 Generate a comprehensive response to the query based on the retrieved content.
@@ -40,7 +37,7 @@ Use the knowledge synthesis to guide your response, but focus on addressing the 
 Make citations specific and relevant - cite the exact source where a piece of information comes from.
 """
 
-# Enhanced response generation prompt template for research mode
+# Response generation prompt template for research mode
 RESEARCH_MODE_PROMPT = """
 You are an AI assistant specializing in cross-document research and analysis.
 Generate a comprehensive response combining insights from multiple documents.
@@ -65,84 +62,59 @@ For each key point, indicate which document(s) the information comes from.
 If documents contradict each other, present both perspectives fairly.
 """
 
-async def generate_response(state: GraphState) -> GraphState:
+def generate_response(state: GraphState) -> GraphState:
     """
     Generate the final response based on retrieved content and knowledge synthesis.
-    Enhanced with better fallback mechanisms when retrieval fails.
 
     Args:
-        state: Current graph state
+        state: Current graph state containing retrieval results and knowledge synthesis
 
     Returns:
         Updated graph state with generated response
     """
+    # Validate required states
+    if not state.retrieval_state or not state.query_state:
+        logger.warning("Missing retrieval or query state for response generation")
+        error_msg = "Missing required information to generate a response"
+
+        state.generation_state = GenerationState(
+            response="I'm sorry, but I don't have enough information to provide a response.",
+            citations=[],
+            metadata={"error": error_msg}
+        )
+        return state
+
+    # Check if we have elements to work with
+    has_elements = state.retrieval_state.elements and len(state.retrieval_state.elements) > 0
+
+    if not has_elements:
+        logger.warning("No elements retrieved, generating fallback response")
+
+        # Check for specific database errors
+        error_msg = ""
+        if state.retrieval_state.metadata and "error" in state.retrieval_state.metadata:
+            error_msg = state.retrieval_state.metadata["error"]
+
+        # Generate appropriate fallback response
+        if "Neo4j" in error_msg or "neo4j" in error_msg:
+            fallback_msg = ("I'm having trouble connecting to the document database. "
+                           "This might be due to a temporary issue. "
+                           "Please try again in a few moments.")
+        else:
+            # Generic fallback for when retrieval simply found nothing relevant
+            fallback_msg = ("I couldn't find specific information in the document to answer your query. "
+                           "Could you please rephrase your question or provide more details about what you're looking for?")
+
+        state.generation_state = GenerationState(
+            response=fallback_msg,
+            citations=[],
+            metadata={"fallback": True, "reason": "no_results"}
+        )
+        return state
+
+    logger.info(f"Generating response for query: {state.query_state.query[:50]}...")
+
     try:
-        if (not state.query_state):
-            logger.error("Query state is required for response generation")
-            raise ValueError("Required states are missing")
-
-        # Check if we have retrieval state
-        if not state.retrieval_state:
-            logger.warning("No retrieval state found, creating empty retrieval state")
-            state.retrieval_state = RetrievalState(
-                elements=[],
-                sources=[],
-                metadata={"error": "Retrieval state missing"}
-            )
-
-        # Check if we have enough elements for a response
-        has_elements = (state.retrieval_state.elements and len(state.retrieval_state.elements) > 0)
-
-        # Generate appropriate response based on retrieval success
-        if not has_elements:
-            logger.warning("No elements retrieved, generating fallback response")
-
-            # Check for specific database errors
-            error_msg = ""
-            if state.retrieval_state.metadata and "error" in state.retrieval_state.metadata:
-                error_msg = state.retrieval_state.metadata["error"]
-                logger.warning(f"Retrieval error: {error_msg}")
-
-            # Look for Neo4j specific errors
-            neo4j_issue = False
-            index_issue = False
-            if "Neo4j" in error_msg or "neo4j" in error_msg:
-                neo4j_issue = True
-                if "index" in error_msg or "Index" in error_msg:
-                    index_issue = True
-
-            # Generate appropriate fallback response
-            if neo4j_issue:
-                if index_issue:
-                    fallback_msg = ("I couldn't retrieve information from the document database due to a missing index. "
-                                   "The database may need to be properly set up with the required indices. "
-                                   "Please try uploading your document again or contact support.")
-                else:
-                    fallback_msg = ("I'm having trouble connecting to the document database. "
-                                   "This might be due to a temporary issue. "
-                                   "Please try again in a few moments or contact support if the problem persists.")
-            else:
-                # Generic fallback for when retrieval simply found nothing relevant
-                fallback_msg = ("I couldn't find specific information in the document to answer your query. "
-                               "Could you please rephrase your question or provide more details about what you're looking for?")
-
-                # Add suggestions for the specific document they uploaded
-                if state.conversation_state and state.conversation_state.pdf_id:
-                    pdf_id = state.conversation_state.pdf_id
-                    fallback_msg += f"\n\nSince this document appears to be about Neo4j database content, you might try asking about nodes, relationships, or Cypher queries."
-
-            # Create generation state with fallback response
-            state.generation_state = GenerationState(
-                response=fallback_msg,
-                citations=[],
-                metadata={"fallback": True, "reason": "no_results"}
-            )
-
-            logger.info("Generated fallback response due to retrieval issues")
-            return state
-
-        logger.info(f"Generating response for query: {state.query_state.query}")
-
         # Determine if we're in research mode
         is_research_mode = False
         if state.query_state.pdf_ids and len(state.query_state.pdf_ids) > 1:
@@ -156,10 +128,10 @@ async def generate_response(state: GraphState) -> GraphState:
         # Add document title mapping for research mode
         document_titles = {}
 
-        # Sort elements by score first if available
+        # Sort elements by score if available
         sorted_elements = sorted(
             state.retrieval_state.elements,
-            key=lambda x: getattr(x.metadata, 'score', 0) if hasattr(x, 'metadata') else 0,
+            key=lambda x: x.get("metadata", {}).get("score", 0) if isinstance(x.get("metadata"), dict) else 0,
             reverse=True
         )
 
@@ -168,21 +140,19 @@ async def generate_response(state: GraphState) -> GraphState:
 
         for i, element in enumerate(elements_to_use):
             # Determine content type
-            content_type = element.content_type.value if hasattr(element.content_type, 'value') else str(element.content_type)
+            content_type = element.get("content_type", "text")
 
             # Create citation ID
             citation_id = f"[{i+1}]"
 
             # Get PDF ID and page info safely
-            pdf_id = element.pdf_id if hasattr(element, 'pdf_id') else "unknown"
-            page = element.page if hasattr(element, 'page') else None
+            pdf_id = element.get("pdf_id", "")
+            page = element.get("page", 0)
 
             # Get document title if available
             document_title = None
-            if hasattr(element, 'metadata') and hasattr(element.metadata, 'document_title'):
-                document_title = element.metadata.document_title
-            elif hasattr(element, 'metadata') and isinstance(element.metadata, dict) and 'document_title' in element.metadata:
-                document_title = element.metadata['document_title']
+            if isinstance(element.get("metadata"), dict) and "document_title" in element["metadata"]:
+                document_title = element["metadata"]["document_title"]
             else:
                 document_title = f"Document {pdf_id}"
 
@@ -191,7 +161,7 @@ async def generate_response(state: GraphState) -> GraphState:
 
             # Create citation metadata
             citation_map[citation_id] = {
-                "id": element.id if hasattr(element, 'id') else element.element_id if hasattr(element, 'element_id') else f"element_{i}",
+                "id": element.get("id", "") or element.get("element_id", f"element_{i}"),
                 "type": content_type,
                 "pdf_id": pdf_id,
                 "page": page,
@@ -200,44 +170,44 @@ async def generate_response(state: GraphState) -> GraphState:
 
             # Format the content with citation marker
             content_str += f"\n--- Content {citation_id} (Type: {content_type}, Document: {document_title}) ---\n"
-            content_str += element.content[:1000] + ("..." if len(element.content) > 1000 else "")
+            content_str += element.get("content", "")[:1000] + ("..." if len(element.get("content", "")) > 1000 else "")
 
         # Format research insights if available
         insights_str = ""
-        if is_research_mode and hasattr(state, 'research_state') and state.research_state:
-            if hasattr(state.research_state, 'insights') and state.research_state.insights:
+        if is_research_mode and state.research_state:
+            if state.research_state.insights:
                 insights_str += "Cross-Document Insights:\n"
                 for insight in state.research_state.insights:
                     insights_str += f"- {insight}\n"
 
-            if hasattr(state.research_state, 'cross_references') and state.research_state.cross_references:
+            if state.research_state.cross_references:
                 insights_str += "\nCommon Concepts Across Documents:\n"
                 for i, concept in enumerate(state.research_state.cross_references[:5]):
-                    if isinstance(concept, dict) and 'name' in concept:
+                    if isinstance(concept, dict) and "name" in concept:
                         insights_str += f"- {concept['name']}\n"
                     else:
                         insights_str += f"- {concept}\n"
 
         # Format knowledge synthesis if available
         synthesis_str = ""
-        if hasattr(state, 'research_state') and state.research_state and hasattr(state.research_state, 'research_context'):
+        if state.research_state and hasattr(state.research_state, 'research_context'):
             context = state.research_state.research_context
-            if hasattr(context, 'summary') and context.summary:
+            if context.summary:
                 synthesis_str += f"Summary: {context.summary}\n\n"
 
-            if hasattr(context, 'facts') and context.facts:
+            if context.facts:
                 synthesis_str += "Key Facts:\n"
                 for fact in context.facts[:5]:  # Limit to most important facts
                     synthesis_str += f"- {fact}\n"
                 synthesis_str += "\n"
 
-            if hasattr(context, 'insights') and context.insights:
+            if context.insights:
                 synthesis_str += "Insights:\n"
                 for insight in context.insights[:3]:  # Limit to key insights
                     synthesis_str += f"- {insight}\n"
 
         # Initialize OpenAI client
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
         # Choose prompt based on research mode
         if is_research_mode:
@@ -261,7 +231,7 @@ async def generate_response(state: GraphState) -> GraphState:
 
         # Call the OpenAI API
         response = client.chat.completions.create(
-            model="gpt-4-0125-preview",
+            model="gpt-4",  # Use the most capable model
             messages=[
                 {"role": "system", "content": "You are an expert assistant for technical documentation."},
                 {"role": "user", "content": prompt}
@@ -285,8 +255,8 @@ async def generate_response(state: GraphState) -> GraphState:
             response=response_text,
             citations=citations,
             metadata={
-                "timestamp": datetime.utcnow().isoformat(),
-                "model": "gpt-4-0125-preview",
+                "timestamp": datetime.now().isoformat(),
+                "model": "gpt-4",
                 "token_usage": {
                     "prompt_tokens": response.usage.prompt_tokens,
                     "completion_tokens": response.usage.completion_tokens,
@@ -305,15 +275,13 @@ async def generate_response(state: GraphState) -> GraphState:
 
         logger.info(
             f"Response generation complete with {len(citations)} citations, "
-            f"{response.usage.total_tokens} total tokens, "
-            f"research_mode={is_research_mode}"
+            f"{response.usage.total_tokens} total tokens"
         )
 
         return state
 
     except Exception as e:
-        logger.error(f"Response generation failed: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Response generation failed: {str(e)}", exc_info=True)
 
         # Generate error response
         error_response = "I'm sorry, but I encountered an error while generating a response. Please try again or rephrase your query."
@@ -321,6 +289,7 @@ async def generate_response(state: GraphState) -> GraphState:
         # Create error state
         state.generation_state = GenerationState(
             response=error_response,
+            citations=[],
             metadata={"error": str(e)}
         )
 

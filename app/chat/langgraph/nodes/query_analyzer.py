@@ -1,222 +1,159 @@
 """
 Query analyzer node for LangGraph-based PDF RAG system.
-This node determines the optimal retrieval strategy for a given query.
+Determines the optimal retrieval strategy for a given query.
 """
 
 import logging
-import os
-from typing import List, Dict, Any, Optional
-import asyncio
+import re
+from typing import Dict, Any, List, Optional
 from datetime import datetime
-
-from openai import AsyncOpenAI
 
 from app.chat.langgraph.state import GraphState, RetrievalStrategy, ContentType
 
 logger = logging.getLogger(__name__)
 
-QUERY_ANALYSIS_SYSTEM_PROMPT = """You are an AI specialized in analyzing search queries to determine the optimal retrieval strategy.
-Given a user question, you need to:
-1. Identify if this is a general question or a specific lookup
-2. Determine the best retrieval strategy based on the query content
-3. Detect if the query refers to specific content types (text, tables, images)
-4. Extract key concepts and keywords
-
-Retrieval Strategies:
-- SEMANTIC: For conceptual questions that require deep understanding
-- KEYWORD: For specific term lookups
-- HYBRID: Combination of semantic and keyword (default)
-- CONCEPT: For questions about relationships between ideas
-- TABLE: For questions specifically about tabular data
-- IMAGE: For questions about visual information
-- COMBINED: When multiple strategies would be helpful
-
-Content Types:
-- TEXT: General text information
-- TABLE: Structured tabular data
-- FIGURE: Images, diagrams, charts
-- EQUATION: Mathematical formulas
-- CODE: Programming code snippets
-"""
-
-QUERY_ANALYSIS_PROMPT = """Analyze the following user query: "{query}"
-
-Determine:
-- retrieval_strategy: The optimal retrieval strategy from [SEMANTIC, KEYWORD, HYBRID, CONCEPT, TABLE, IMAGE, COMBINED]
-- query_type: The general intent (e.g., "lookup", "understanding", "comparison", "procedural")
-- focused_elements: List of content element types to focus on (e.g., "text", "table", "image")
-"""
-
-async def process_query(query: str, pdf_ids: List[str] = None) -> Dict[str, Any]:
-    """
-    Process a user query to determine the optimal retrieval strategy.
-
-    Args:
-        query: The user's query text
-        pdf_ids: Optional list of PDF IDs to search within
-
-    Returns:
-        Dictionary with query analysis results
-    """
-    try:
-        # Ensure query is a string
-        if not isinstance(query, str):
-            query = str(query)
-
-        # Initialize query analysis response
-        result = {
-            "query": query,
-            "pdf_ids": pdf_ids or [],
-            "retrieval_strategy": RetrievalStrategy.HYBRID,  # default strategy
-            "query_type": "general",
-            "focused_elements": ["text"],
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        # Use OpenAI to analyze the query if it's complex enough
-        if len(query.split()) > 3:  # Only analyze non-trivial queries
-            client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
-            # Prepare the prompt
-            formatted_prompt = QUERY_ANALYSIS_PROMPT.format(query=query)
-
-            # Call the model
-            response = await client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": QUERY_ANALYSIS_SYSTEM_PROMPT},
-                    {"role": "user", "content": formatted_prompt}
-                ],
-                temperature=0.3,
-                max_tokens=150
-            )
-
-            # Extract analysis from response
-            analysis_text = response.choices[0].message.content
-
-            # Parse the analysis (simple keyword-based parsing)
-            if "SEMANTIC" in analysis_text:
-                result["retrieval_strategy"] = RetrievalStrategy.SEMANTIC
-            elif "KEYWORD" in analysis_text:
-                result["retrieval_strategy"] = RetrievalStrategy.KEYWORD
-            elif "CONCEPT" in analysis_text:
-                result["retrieval_strategy"] = RetrievalStrategy.CONCEPT
-            elif "TABLE" in analysis_text:
-                result["retrieval_strategy"] = RetrievalStrategy.TABLE
-                result["focused_elements"] = ["table"]
-            elif "IMAGE" in analysis_text:
-                result["retrieval_strategy"] = RetrievalStrategy.IMAGE
-                result["focused_elements"] = ["figure"]
-            elif "COMBINED" in analysis_text:
-                result["retrieval_strategy"] = RetrievalStrategy.COMBINED
-
-            # Extract query type if present
-            if "query_type" in analysis_text.lower():
-                query_type_line = [line for line in analysis_text.split('\n') if "query_type" in line.lower()]
-                if query_type_line:
-                    # Simple extraction, can be improved for robustness
-                    query_type = query_type_line[0].split(":")[-1].strip().strip('"').lower()
-                    result["query_type"] = query_type
-
-            # Extract focused elements if present
-            if "focused_elements" in analysis_text.lower():
-                elements_line = [line for line in analysis_text.split('\n') if "focused_elements" in line.lower()]
-                if elements_line:
-                    # Simple extraction, can be improved for robustness
-                    elements_text = elements_line[0].split(":")[-1].strip().lower()
-                    elements = [e.strip().strip('"').strip("'").strip(",") for e in elements_text.split()]
-                    if elements:
-                        result["focused_elements"] = elements
-
-        logger.info(f"Query analysis result: strategy={result['retrieval_strategy']}, type={result['query_type']}")
-        return result
-
-    except Exception as e:
-        logger.error(f"Error in query analysis: {str(e)}")
-        # Fall back to default analysis
-        return {
-            "query": query,
-            "pdf_ids": pdf_ids or [],
-            "retrieval_strategy": RetrievalStrategy.HYBRID,
-            "query_type": "general",
-            "focused_elements": ["text"],
-            "timestamp": datetime.utcnow().isoformat(),
-            "error": str(e)
-        }
-
-def analyze(state: GraphState) -> GraphState:
+def analyze_query(state: GraphState) -> GraphState:
     """
     Analyze a user query to determine the optimal retrieval strategy.
+    Simplified implementation with clear deterministic rules.
+
+    Args:
+        state: Current graph state
+
+    Returns:
+        Updated graph state with query analysis
     """
     try:
+        # Validate state
         if not state.query_state:
-            logger.error("Query state is required for query analysis")
-            raise ValueError("Query state is required")
+            logger.error("Query state is required for analysis")
+            return state
 
-        # For now, use basic heuristics to determine retrieval strategy
-        # Make sure we're accessing query properly
-        if not hasattr(state, 'query_state') or not state.query_state:
-            logger.error("State does not have query_state or it's None")
-            query = ""
-        elif not hasattr(state.query_state, 'query') or not state.query_state.query:
-            logger.error("query_state does not have query attribute or it's None")
-            query = ""
-        else:
-            query = state.query_state.query.lower()
-            logger.debug(f"Processing query: {query}")
+        # Get query from state
+        query = state.query_state.query.lower() if state.query_state.query else ""
+        logger.info(f"Analyzing query: {query[:50]}...")
+
+        # Extract keywords (simple implementation, could be enhanced with NLP)
+        # Remove common stop words
+        stop_words = {"the", "a", "an", "and", "or", "but", "of", "in", "on", "with", "for", "to", "from"}
+        words = re.findall(r'\b[a-z0-9]+\b', query.lower())
+        keywords = [word for word in words if len(word) > 3 and word not in stop_words]
+
+        # Update keywords in state
+        state.query_state.keywords = keywords
 
         # Detect specific content types
         focused_elements = []
-        if any(term in query for term in ["table", "row", "column", "cell", "tabular"]):
-            focused_elements.append(ContentType.TABLE)
-            state.query_state.retrieval_strategy = RetrievalStrategy.TABLE
 
-        elif any(term in query for term in ["image", "figure", "diagram", "chart", "picture", "photo"]):
-            focused_elements.append(ContentType.FIGURE)
-            state.query_state.retrieval_strategy = RetrievalStrategy.IMAGE
-
-        elif any(term in query for term in ["relate", "relationship", "concept", "connection", "between"]):
-            state.query_state.retrieval_strategy = RetrievalStrategy.CONCEPT
-
-        elif any(term in query for term in ["exact", "specific", "find", "locate", "where"]):
-            state.query_state.retrieval_strategy = RetrievalStrategy.KEYWORD
-
-        else:
-            # Default to hybrid retrieval
+        # Check for table references
+        if any(term in query for term in ["table", "column", "row", "cell", "spreadsheet", "tabular"]):
+            focused_elements.append(ContentType.TABLE.value)
             state.query_state.retrieval_strategy = RetrievalStrategy.HYBRID
 
-        # Set focused elements
+        # Check for image references
+        elif any(term in query for term in ["image", "figure", "diagram", "chart", "picture", "photo", "graph"]):
+            focused_elements.append(ContentType.IMAGE.value)
+            state.query_state.retrieval_strategy = RetrievalStrategy.HYBRID
+
+        # Check for code references
+        elif any(term in query for term in ["code", "function", "class", "program", "script", "api"]):
+            focused_elements.append(ContentType.CODE.value)
+            state.query_state.retrieval_strategy = RetrievalStrategy.HYBRID
+
+        # Check for mathematical content
+        elif any(term in query for term in ["equation", "formula", "math", "calculation"]):
+            focused_elements.append(ContentType.EQUATION.value)
+            state.query_state.retrieval_strategy = RetrievalStrategy.HYBRID
+
+        # Check if query is best suited for concept search
+        elif any(term in query for term in ["related", "connection", "relationship", "similar"]):
+            state.query_state.retrieval_strategy = RetrievalStrategy.CONCEPT
+
+        # Check if query is best suited for semantic search
+        elif any(term in query for term in ["about", "like", "meaning", "explain", "understand", "concept"]):
+            state.query_state.retrieval_strategy = RetrievalStrategy.SEMANTIC
+
+        # Check if query is best suited for keyword search
+        elif any(term in query for term in ["exactly", "specific", "find", "locate", "where"]):
+            state.query_state.retrieval_strategy = RetrievalStrategy.KEYWORD
+
+        # Default to hybrid search
+        else:
+            state.query_state.retrieval_strategy = RetrievalStrategy.HYBRID
+
+        # Update focused elements
         state.query_state.focused_elements = focused_elements
 
-        # Extract simple keywords (could be enhanced with NLP)
-        import re
-        words = re.findall(r'\b\w+\b', query)
-        state.query_state.keywords = [word for word in words if len(word) > 3 and word not in [
-            "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
-            "about", "does", "this", "that", "these", "those", "have", "from"
-        ]]
-
-        # Set query type based on interrogative words
-        if "how" in query:
-            state.query_state.query_type = "procedural"
-        elif "why" in query:
-            state.query_state.query_type = "explanation"
-        elif "compare" in query or "difference" in query or "versus" in query or "vs" in query:
-            state.query_state.query_type = "comparison"
-        elif any(w in query for w in ["what", "who", "when", "where"]):
+        # Detect query type based on patterns
+        if query.startswith("how"):
+            state.query_state.query_type = "instructional"
+        elif query.startswith("why"):
+            state.query_state.query_type = "explanatory"
+        elif query.startswith("what") or query.startswith("who") or query.startswith("when") or query.startswith("where"):
             state.query_state.query_type = "factual"
+        elif "compare" in query or "difference" in query or "versus" in query or "vs" in query:
+            state.query_state.query_type = "comparative"
+        elif "list" in query or "enumerate" in query or "what are" in query:
+            state.query_type = "listing"
         else:
             state.query_state.query_type = "general"
 
-        # Log analysis results
-        logger.info(f"Query analysis: strategy={state.query_state.retrieval_strategy}, " +
-                  f"type={state.query_state.query_type}, elements={focused_elements}")
+        # Extract technical concepts
+        technical_concepts = extract_technical_terms(query)
+
+        # Update concepts in state
+        state.query_state.concepts = technical_concepts
+
+        # Update metadata
+        if not state.query_state.metadata:
+            state.query_state.metadata = {}
+
+        state.query_state.metadata["analyzed_at"] = datetime.now().isoformat()
+        state.query_state.metadata["strategy_reasoning"] = f"Selected {state.query_state.retrieval_strategy} based on query patterns"
+
+        logger.info(f"Query analysis: strategy={state.query_state.retrieval_strategy}, "
+                   f"type={state.query_state.query_type}, concepts={technical_concepts[:5]}")
 
         return state
+
     except Exception as e:
-        logger.error(f"Error in query analysis: {str(e)}", exc_info=True)
-        # Initialize with default values if something went wrong
+        logger.error(f"Query analysis error: {str(e)}", exc_info=True)
+
+        # Ensure we have valid query state with defaults
         if state.query_state:
             state.query_state.retrieval_strategy = RetrievalStrategy.HYBRID
             state.query_state.query_type = "general"
+
         return state
+
+def extract_technical_terms(text: str) -> List[str]:
+    """
+    Extract technical terms from text.
+    Simple regex-based approach for pattern matching.
+
+    Args:
+        text: Input text
+
+    Returns:
+        List of technical terms
+    """
+    if not text:
+        return []
+
+    # Define patterns for technical terms
+    patterns = [
+        r'\b[A-Z][A-Z0-9]+\b',                   # Acronyms like PDF, API, etc.
+        r'\b[A-Za-z]+\d+[A-Za-z0-9]*\b',         # Technical codes like GPT3, T5, etc.
+        r'\b[a-z]+[-_][a-z]+\b',                 # Hyphenated terms like machine-learning
+        r'\b[A-Z][a-z]+[A-Z][a-z]+[a-zA-Z]*\b',  # CamelCase terms like LangGraph
+    ]
+
+    # Extract terms
+    terms = set()
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        terms.update(matches)
+
+    # Filter common non-technical terms
+    non_technical = {'And', 'The', 'This', 'That', 'With', 'From', 'Into'}
+    return list(term for term in terms if term not in non_technical)

@@ -47,7 +47,7 @@ from .langgraph_helpers import (
 def setup_logging(pdf_id: str, output_dir: str = "output") -> None:
     """
     Set up logging for document processing.
-    
+
     Args:
         pdf_id: Document identifier
         output_dir: Output directory
@@ -55,18 +55,61 @@ def setup_logging(pdf_id: str, output_dir: str = "output") -> None:
     import logging
     import os
     from pathlib import Path
-    
+
     log_dir = Path(output_dir) / pdf_id / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
     log_path = log_dir / "processing.log"
-    
+
     # Configure logger
     logger = logging.getLogger()
     handler = logging.FileHandler(log_path)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
-    
+
     # Add handler if it doesn't exist
     if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(log_path) for h in logger.handlers):
         logger.addHandler(handler)
+
+def validate_content_element_class():
+    """
+    Validate that the ContentElement class has the expected structure.
+    This helps identify attribute mismatches before they cause runtime errors.
+    """
+    from app.chat.types import ContentElement, ContentType
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Create a test instance
+        test_element = ContentElement(
+            element_id="test",
+            content="Test content",
+            content_type=ContentType.TEXT,
+            pdf_id="test_pdf",
+            metadata={}
+        )
+
+        # Check required attributes
+        required_attrs = [
+            'element_id', 'content', 'content_type', 'pdf_id', 'metadata'
+        ]
+
+        for attr in required_attrs:
+            if not hasattr(test_element, attr):
+                logger.error(f"ContentElement class missing required attribute: {attr}")
+                return False
+
+        # Verify content_type is an enum or has expected structure
+        if hasattr(test_element.content_type, 'value'):
+            logger.info(f"content_type has value attribute: {test_element.content_type.value}")
+        else:
+            logger.warning(f"content_type has no 'value' attribute: {type(test_element.content_type)}")
+
+        logger.info("ContentElement class validated successfully")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error validating ContentElement class: {str(e)}")
+        return False        

@@ -1,36 +1,35 @@
 """
-Conversation views for PDF RAG application with LangGraph integration.
-Handles conversation management, message streaming and research mode.
+Conversation views for PDF RAG application.
+Provides API endpoints for conversation management with improved error handling.
 """
 
 from flask import Blueprint, g, request, jsonify, Response, stream_with_context
 import logging
 import json
-import asyncio
 from datetime import datetime
-import uuid
 import traceback
-import sys
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from app.chat.types import ResearchMode, ChatArgs
 from app.chat.chat_manager import ChatManager
-from app.chat.memories.memory_manager import MemoryManager
-from app.web.async_wrapper import async_handler, run_async
+from app.web.async_wrapper import async_handler
 from app.web.hooks import login_required
 from app.web.db.models import Conversation, Message
 from app.web.db import db
+from app.web.api import (
+    process_query,
+    get_conversation_history,
+    clear_conversation,
+    list_conversations
+)
 
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("conversation", __name__, url_prefix="/api/conversations")
 
-# Memory manager instance to be used across routes
-memory_manager = MemoryManager()
-
 @bp.route("/<string:pdf_id>", methods=["GET"])
 @login_required
-def list_conversations(pdf_id):
+def list_pdf_conversations(pdf_id):
     """List conversations for a PDF."""
     try:
         logger.info(f"Listing conversations for PDF {pdf_id}")
@@ -42,10 +41,10 @@ def list_conversations(pdf_id):
             is_deleted=False
         ).order_by(Conversation.last_updated.desc()).all()
 
-        # Format for API response - critical for frontend compatibility
+        # Format for API response
         result = []
         for conv in conversations:
-            # Format the conversation for the frontend
+            # Format the conversation
             result.append({
                 "id": conv.id,
                 "title": conv.title,
@@ -56,64 +55,72 @@ def list_conversations(pdf_id):
                 "messages": []  # Initialize empty messages array for frontend compatibility
             })
 
-        # Return as array in "conversations" field for frontend compatibility
+        # Return as array in "conversations" field for frontend
         return jsonify({"conversations": result})
+
     except Exception as e:
         logger.error(f"Error listing conversations: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-@bp.route("/<pdf_id>", methods=["POST"])
+@bp.route("/<string:pdf_id>", methods=["POST"])
 @login_required
 def create_conversation(pdf_id):
     """Create a new conversation for a PDF."""
     try:
         logger.info(f"Creating new conversation for PDF {pdf_id}")
 
-        # Ensure PDF ID is properly formatted
-        pdf_id_str = str(pdf_id)
+        from app.chat.memories.memory_manager import MemoryManager
+        memory_manager = MemoryManager()
 
-        # Create a new conversation in the database
-        conversation = Conversation(
-            id=str(uuid.uuid4()),
-            title=f"Conversation about {pdf_id_str}",
+        # Create a new conversation
+        conversation_state = memory_manager.create_conversation(
+            title=f"Conversation about {pdf_id}",
             pdf_id=pdf_id,
-            user_id=g.user.id,
-            json_metadata={
-                "pdf_id": pdf_id_str,
-                "created_at": datetime.utcnow().isoformat(),
+            metadata={
+                "user_id": g.user.id,
+                "pdf_id": pdf_id,
+                "created_at": datetime.now().isoformat(),
                 "research_mode": {
                     "active": False,
-                    "pdf_ids": [pdf_id_str],
+                    "pdf_ids": [pdf_id],
                     "document_names": {}
                 }
             }
         )
 
-        # Save to database
-        db.session.add(conversation)
-        db.session.commit()
+        # Create database entry
+        db_conversation = Conversation(
+            id=conversation_state.conversation_id,
+            title=conversation_state.title,
+            pdf_id=pdf_id,
+            user_id=g.user.id,
+            json_metadata=conversation_state.metadata
+        )
 
         # Add system message
         system_message = Message(
-            conversation_id=conversation.id,
+            conversation_id=conversation_state.conversation_id,
             role="system",
             content="You are an AI assistant specialized in answering questions about documents."
         )
 
+        # Save to database
+        db.session.add(db_conversation)
         db.session.add(system_message)
         db.session.commit()
 
-        # Return the new conversation in the format frontend expects
+        # Return the new conversation
         response_data = {
-            "id": conversation.id,
-            "title": conversation.title,
-            "pdf_id": pdf_id_str,
-            "messages": [],  # CRITICAL: Initialize as empty array for frontend
-            "metadata": conversation.json_metadata
+            "id": conversation_state.conversation_id,
+            "title": conversation_state.title,
+            "pdf_id": pdf_id,
+            "messages": [],  # Initialize as empty array for frontend
+            "metadata": conversation_state.metadata
         }
 
-        logger.info(f"Created conversation {conversation.id} for PDF {pdf_id}")
+        logger.info(f"Created conversation {conversation_state.conversation_id} for PDF {pdf_id}")
         return jsonify(response_data)
+
     except Exception as e:
         logger.error(f"Error creating conversation: {str(e)}")
         logger.error(traceback.format_exc())
@@ -171,14 +178,6 @@ def create_message(conversation_id):
 
         logger.info(f"Processing message for conversation {conversation_id}, research mode: {use_research}")
 
-        # Initialize ChatManager with proper arguments
-        chat_args = ChatArgs(
-            conversation_id=conversation_id,
-            pdf_id=str(conversation.pdf_id) if conversation.pdf_id else None,
-            stream_enabled=stream_enabled,
-            research_mode=ResearchMode.RESEARCH if use_research else ResearchMode.SINGLE
-        )
-
         # If streaming is enabled, delegate to the streaming response
         if stream_enabled:
             return stream_chat_response(
@@ -189,50 +188,40 @@ def create_message(conversation_id):
                 active_docs=active_docs
             )
         else:
-            # Process non-streaming query in current thread.
-            chat_manager = ChatManager(chat_args)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                try:
-                    result = loop.run_until_complete(
-                        chat_manager.query(user_message, config={"recursion_limit": 100})
-                    )
-                except TypeError as te:
-                    if "unexpected keyword argument 'config'" in str(te):
-                        logger.warning("ChatManager doesn't accept config parameter, falling back to standard call")
-                        result = loop.run_until_complete(chat_manager.query(user_message))
-                    else:
-                        raise
-            finally:
-                # Clean up async tasks and close the event loop.
-                try:
-                    pending_tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
-                    if pending_tasks:
-                        for task in pending_tasks:
-                            task.cancel()
-                        loop.run_until_complete(asyncio.gather(*pending_tasks, return_exceptions=True))
-                except Exception as cleanup_err:
-                    logger.error(f"Error cleaning up async tasks: {str(cleanup_err)}")
-                finally:
-                    loop.close()
+            # Process non-streaming query
+            research_mode_str = "research" if use_research else "single"
+            pdf_ids = active_docs if use_research and active_docs else [str(conversation.pdf_id)] if conversation.pdf_id else None
+
+            result = process_query(
+                query=user_message,
+                conversation_id=conversation_id,
+                pdf_id=str(conversation.pdf_id) if conversation.pdf_id else None,
+                research_mode=research_mode_str,
+                stream=False,
+                pdf_ids=pdf_ids
+            )
 
             if "error" in result:
                 logger.error(f"Error in message processing: {result['error']}")
                 return jsonify({"error": result["error"]}), 500
 
-            # Add assistant message to database.
-            assistant_db_message = Message(
+            # Add assistant message to database if not already handled by ChatManager
+            if not db.session.query(Message).filter_by(
                 conversation_id=conversation_id,
                 role="assistant",
-                content=result["response"],
-                meta_json={
-                    "citations": result.get("citations", []),
-                    "research_mode": conversation.json_metadata.get("research_mode") if conversation.json_metadata else None
-                }
-            )
-            db.session.add(assistant_db_message)
-            db.session.commit()
+                content=result["response"]
+            ).first():
+                assistant_db_message = Message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=result["response"],
+                    meta_json=json.dumps({
+                        "citations": result.get("citations", []),
+                        "research_mode": conversation.json_metadata.get("research_mode") if conversation.json_metadata else None
+                    })
+                )
+                db.session.add(assistant_db_message)
+                db.session.commit()
 
             return jsonify({
                 "response": result["response"],
@@ -245,47 +234,25 @@ def create_message(conversation_id):
         logger.error(f"Error processing message: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-@bp.route("/<conversation_id>/messages", methods=["GET"])
+@bp.route("/<string:conversation_id>/messages", methods=["GET"])
 @login_required
 def get_messages(conversation_id):
-    """Retrieve all messages for a specific conversation."""
+    """Retrieve all messages for a conversation."""
     try:
-        # Get the conversation
-        logger.info(f"Fetching messages for conversation {conversation_id}")
-        conversation = Conversation.query.filter_by(id=conversation_id).first()
+        # Get conversation history
+        result = get_conversation_history(conversation_id)
 
-        if not conversation:
-            return jsonify({"error": "Conversation not found"}), 404
+        if "error" in result:
+            return jsonify({"error": result["error"]}), 404
 
-        # Validate user owns the conversation
-        if conversation.user_id != g.user.id:
-            return jsonify({"error": "Unauthorized access to conversation"}), 403
+        # Return messages
+        return jsonify({"messages": result["messages"]})
 
-        # Format messages for API response
-        messages = []
-        for msg in conversation.messages:
-            # Skip system messages - frontend doesn't need them
-            if msg.role == "system":
-                continue
-
-            # Create message object
-            message_obj = {
-                "id": str(uuid.uuid4()),  # Generate ID for frontend tracking
-                "role": msg.role,
-                "content": msg.content,
-                "created_at": msg.created_on.isoformat() if hasattr(msg.created_on, 'isoformat') else str(msg.created_on),
-                "metadata": msg.msg_metadata or {}
-            }
-
-            messages.append(message_obj)
-
-        return jsonify({"messages": messages})
     except Exception as e:
         logger.error(f"Error retrieving messages: {str(e)}", exc_info=True)
-        logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
-@bp.route("/<conversation_id>/research", methods=["POST"])
+@bp.route("/<string:conversation_id>/research", methods=["POST"])
 @login_required
 def update_research_mode(conversation_id):
     """Update research mode for a conversation."""
@@ -337,7 +304,6 @@ def update_research_mode(conversation_id):
         else:
             # Deactivating research mode
             conversation.json_metadata["research_mode"]["active"] = False
-            # Keep PDF IDs for reference
 
         # Save changes
         db.session.add(conversation)
@@ -350,19 +316,17 @@ def update_research_mode(conversation_id):
             "status": "success",
             "research_mode": conversation.json_metadata["research_mode"]
         })
+
     except Exception as e:
         logger.error(f"Error updating research mode: {str(e)}", exc_info=True)
-        logger.error(traceback.format_exc())
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
-@bp.route("/<conversation_id>/clear", methods=["POST"])
+@bp.route("/<string:conversation_id>/clear", methods=["POST"])
 @login_required
 def clear_conversation_history(conversation_id):
     """Clear conversation history."""
     try:
-        logger.info(f"Clearing conversation {conversation_id}")
-
         # Get the conversation
         conversation = Conversation.query.filter_by(id=conversation_id).first()
         if not conversation:
@@ -372,42 +336,23 @@ def clear_conversation_history(conversation_id):
         if conversation.user_id != g.user.id:
             return jsonify({"error": "Unauthorized access to conversation"}), 403
 
-        # Get the system messages to keep
-        system_messages = [msg for msg in conversation.messages if msg.role == "system"]
+        # Clear conversation history
+        result = clear_conversation(conversation_id)
 
-        # Delete all other messages
-        for msg in conversation.messages:
-            if msg.role != "system":
-                db.session.delete(msg)
-
-        # If no system message, add one
-        if not system_messages:
-            system_message = Message(
-                conversation_id=conversation_id,
-                role="system",
-                content="You are an AI assistant specialized in answering questions about documents."
-            )
-            db.session.add(system_message)
-
-        # Update conversation
-        conversation.last_updated = datetime.utcnow()
-        db.session.add(conversation)
-        db.session.commit()
+        if "error" in result:
+            return jsonify({"error": result["error"]}), 500
 
         return jsonify({"message": "Conversation cleared successfully"})
+
     except Exception as e:
         logger.error(f"Error clearing conversation: {str(e)}", exc_info=True)
-        logger.error(traceback.format_exc())
-        db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
-@bp.route("/<conversation_id>", methods=["DELETE"])
+@bp.route("/<string:conversation_id>", methods=["DELETE"])
 @login_required
 def delete_conversation(conversation_id):
     """Delete a conversation."""
     try:
-        logger.info(f"Deleting conversation {conversation_id}")
-
         # Get the conversation
         conversation = Conversation.query.filter_by(id=conversation_id).first()
         if not conversation:
@@ -425,16 +370,16 @@ def delete_conversation(conversation_id):
             conversation.json_metadata = {}
 
         conversation.json_metadata["is_deleted"] = True
-        conversation.json_metadata["deleted_at"] = datetime.utcnow().isoformat()
+        conversation.json_metadata["deleted_at"] = datetime.now().isoformat()
 
         # Save changes
         db.session.add(conversation)
         db.session.commit()
 
         return jsonify({"message": "Conversation deleted successfully"})
+
     except Exception as e:
         logger.error(f"Error deleting conversation: {str(e)}", exc_info=True)
-        logger.error(traceback.format_exc())
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
@@ -449,93 +394,96 @@ def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_i
             stream_enabled=True
         )
 
-        # Create a new loop for this request
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        chat_manager = ChatManager(chat_args)
 
         try:
-            # Initialize chat manager
-            chat_manager = ChatManager(chat_args)
-            loop.run_until_complete(chat_manager.initialize())
+            # Initialize with conversation history
+            chat_manager.initialize()
 
-            # Set initial message to indicate processing
+            # Set initial message
             yield json.dumps({
                 "type": "status",
                 "status": "processing",
                 "message": "Processing your query..."
             }) + "\n"
 
-            # Create async generator for streaming
-            async def stream_response():
-                try:
-                    async for chunk in chat_manager.stream_query(user_message):
-                        if "error" in chunk:
-                            yield {
-                                "type": "error",
-                                "error": chunk["error"]
-                            }
-                            return
+            # Stream response
+            pdf_ids_to_use = active_docs if research_mode_str == "research" and active_docs else None
+            response_chunks = []
 
-                        if "status" in chunk and chunk["status"] == "complete":
-                            # Final message with full content
-                            yield {
-                                "type": "end",
-                                "message": chunk.get("response", ""),
-                                "conversation_id": conversation_id,
-                                "citations": chunk.get("citations", [])
-                            }
-
-                            # Save the complete message to database
-                            try:
-                                assistant_message = Message(
-                                    conversation_id=conversation_id,
-                                    role="assistant",
-                                    content=chunk.get("response", ""),
-                                    meta_json={
-                                        "citations": chunk.get("citations", [])
-                                    }
-                                )
-                                db.session.add(assistant_message)
-                                db.session.commit()
-                            except Exception as db_error:
-                                logger.error(f"Error saving assistant message: {str(db_error)}")
-
-                            return
-
-                        if "chunk" in chunk:
-                            # Streaming chunk
-                            yield {
-                                "type": "stream",
-                                "chunk": chunk["chunk"],
-                                "index": chunk.get("index", 0),
-                                "is_complete": chunk.get("is_complete", False)
-                            }
-                except Exception as e:
-                    logger.error(f"Error in stream_response: {str(e)}", exc_info=True)
-                    yield {
-                        "type": "error",
-                        "error": str(e)
-                    }
-
-            # Process the streaming generator
-            stream_gen = stream_response()
-            while True:
-                try:
-                    chunk = loop.run_until_complete(anext_async_generator(stream_gen))
-                    yield json.dumps(chunk) + "\n"
-
-                    # If we got the final message, we're done
-                    if chunk.get("type") == "end" or chunk.get("type") == "error":
-                        break
-
-                except StopAsyncIteration:
-                    break
-                except asyncio.TimeoutError:
+            # Use the streamable ChatManager.stream_query method
+            for chunk in chat_manager.stream_query(user_message, pdf_ids_to_use):
+                if "error" in chunk:
                     yield json.dumps({
                         "type": "error",
-                        "error": "Stream timeout"
+                        "error": chunk["error"]
                     }) + "\n"
-                    break
+                    return
+
+                if "status" in chunk:
+                    if chunk["status"] == "processing":
+                        yield json.dumps({
+                            "type": "status",
+                            "status": "processing",
+                            "message": chunk["message"]
+                        }) + "\n"
+                    elif chunk["status"] == "complete":
+                        # The conversation is already saved by the ChatManager
+                        yield json.dumps({
+                            "type": "end",
+                            "message": chunk["response"],
+                            "conversation_id": conversation_id,
+                            "citations": chunk.get("citations", [])
+                        }) + "\n"
+                        return
+
+                if "type" in chunk and chunk["type"] == "stream":
+                    # Add to accumulated response for database
+                    response_chunks.append(chunk["chunk"])
+
+                    # Yield chunk to client
+                    yield json.dumps({
+                        "type": "stream",
+                        "chunk": chunk["chunk"],
+                        "index": chunk.get("index", 0),
+                        "is_complete": chunk.get("is_complete", False)
+                    }) + "\n"
+
+            # If we reached here without a complete message
+            # save the response to the database as a fallback
+            try:
+                full_response = "".join(response_chunks)
+                if full_response:
+                    # Check if this response is already in the database
+                    existing = db.session.query(Message).filter_by(
+                        conversation_id=conversation_id,
+                        role="assistant",
+                        content=full_response
+                    ).first()
+
+                    if not existing:
+                        # Add assistant message
+                        assistant_message = Message(
+                            conversation_id=conversation_id,
+                            role="assistant",
+                            content=full_response,
+                            meta_json=json.dumps({
+                                "citations": []
+                            })
+                        )
+                        db.session.add(assistant_message)
+                        db.session.commit()
+
+                # Send final message
+                yield json.dumps({
+                    "type": "end",
+                    "message": full_response,
+                    "conversation_id": conversation_id,
+                    "citations": []
+                }) + "\n"
+
+            except Exception as db_error:
+                logger.error(f"Error saving streamed response: {str(db_error)}")
 
         except Exception as e:
             logger.error(f"Error in streaming: {str(e)}", exc_info=True)
@@ -543,33 +491,9 @@ def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_i
                 "type": "error",
                 "error": str(e)
             }) + "\n"
-        finally:
-            # Clean up tasks
-            try:
-                tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
-                if tasks:
-                    for task in tasks:
-                        task.cancel()
-                    loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
-                loop.close()
-            except Exception as e:
-                logger.error(f"Error cleaning up async tasks: {str(e)}")
 
     # Return streaming response
     return Response(
         stream_with_context(generate()),
         mimetype='application/x-ndjson'
     )
-
-async def anext_async_generator(agen, timeout=10.0):
-    """Get next item from async generator with timeout."""
-    try:
-        return await asyncio.wait_for(agen.__anext__(), timeout=timeout)
-    except StopAsyncIteration:
-        raise
-    except asyncio.TimeoutError:
-        logger.warning(f"Timeout waiting for next chunk from stream")
-        raise
-    except Exception as e:
-        logger.error(f"Error in async generator: {str(e)}", exc_info=True)
-        raise

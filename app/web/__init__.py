@@ -13,6 +13,7 @@ from app.web.views import (
     client_views,
     conversation_views,
     stream_views,
+    health_views, # Import health_views here
 )
 # Import the new async wrapper
 from app.web.async_wrapper import async_handler, run_async
@@ -44,6 +45,16 @@ if not os.getenv("NEO4J_URL"):
     os.environ["NEO4J_URL"] = "bolt://localhost:7687"
     os.environ["NEO4J_USER"] = "neo4j"
     os.environ["NEO4J_PASSWORD"] = "password"
+
+# Initialize nest_asyncio for better event loop handling
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+    logging.info("nest_asyncio applied successfully")
+except ImportError:
+    logging.warning("nest_asyncio not available - async nesting may have issues")
+except Exception as e:
+    logging.warning(f"Error applying nest_asyncio: {str(e)}")
 
 # Initialize LangSmith client for tracing and visualization
 langsmith_client = Client()
@@ -78,6 +89,14 @@ def create_app():
     # Log successful startup with async support
     app.logger.info("PDF RAG application started with async support")
 
+    # Add ContentElement validation during startup
+    try:
+        from app.chat.utils import validate_content_element_class
+        content_element_valid = validate_content_element_class()
+        app.logger.info(f"ContentElement validation: {content_element_valid}")
+    except Exception as e:
+        app.logger.error(f"ContentElement validation failed: {str(e)}")
+
     return app
 
 def register_extensions(app):
@@ -110,9 +129,7 @@ def register_blueprints(app):
     app.register_blueprint(score_views.bp)
     app.register_blueprint(conversation_views.bp)
     app.register_blueprint(client_views.bp)
-
-    from app.web.views import health_views
-    app.register_blueprint(health_views.bp)    
+    app.register_blueprint(health_views.bp) #Register the health view
 
     # Stream views are no longer needed as we handle streaming in conversation_views
     # But keep it registered for backward compatibility

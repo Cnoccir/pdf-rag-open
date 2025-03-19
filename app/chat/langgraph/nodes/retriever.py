@@ -1,271 +1,22 @@
 """
 Retriever node for LangGraph-based PDF RAG system.
-This node handles document retrieval using various strategies based on query analysis,
-with optimized Neo4j vector store integration.
+Simplified implementation with improved async/sync handling.
 """
 
-import time
-import concurrent.futures
 import logging
-import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from app.chat.langgraph.state import QueryState, RetrievalState, GraphState, RetrievalStrategy, ContentType
-from app.chat.vector_stores import Neo4jVectorStore, get_vector_store
-from app.chat.types import ContentElement, SearchQuery
+from app.chat.langgraph.state import GraphState, RetrievalStrategy, ContentType
+from app.chat.vector_stores import get_vector_store
+from app.chat.types import ContentElement
 
 logger = logging.getLogger(__name__)
-
-async def _retrieve_content_async(query_state: QueryState) -> RetrievalState:
-    """Asynchronous implementation of content retrieval with improved Neo4j integration."""
-    # Add more detailed logging about PDF IDs
-    logger.info(f"Beginning retrieval: strategy={query_state.retrieval_strategy.value}, "
-               f"pdf_ids={query_state.pdf_ids}, query='{query_state.query[:30]}...'")
-
-    # Initialize retrieval state
-    retrieval_state = RetrievalState(
-        strategies_used=[query_state.retrieval_strategy]
-    )
-
-    try:
-        # Validate PDF IDs - this is critical
-        if not query_state.pdf_ids or len(query_state.pdf_ids) == 0:
-            error_msg = "No PDF IDs provided for retrieval"
-            logger.error(error_msg)
-            retrieval_state.metadata["error"] = error_msg
-            return retrieval_state
-
-        # Get vector store instance
-        vector_store = get_vector_store()
-
-        if not vector_store:
-            error_msg = "Neo4j vector store not available"
-            logger.error(error_msg)
-            retrieval_state.metadata["error"] = error_msg
-            return retrieval_state
-
-        # Try to initialize if needed
-        if not vector_store.initialized:
-            logger.info("Vector store not initialized, initializing...")
-            init_success = await vector_store.initialize_database()
-            if not init_success:
-                error_msg = "Failed to initialize vector store"
-                logger.error(error_msg)
-                retrieval_state.metadata["error"] = error_msg
-                return retrieval_state
-            logger.info("Vector store initialized successfully")
-
-        # Check if we have multiple PDFs (research mode)
-        pdf_ids = query_state.pdf_ids
-        is_research_mode = len(pdf_ids) > 1
-
-        if is_research_mode:
-            logger.info(f"Research mode: searching across {len(pdf_ids)} documents")
-
-        # Determine which retrieval method to use based on strategy
-        start_time = datetime.utcnow()
-
-        # Set up retrieval parameters
-        k = 10  # Number of results per document
-
-        # Determine filter content types if any
-        filter_content_types = None
-        if hasattr(query_state, 'focused_elements') and query_state.focused_elements:
-            # Convert element strings to proper content types
-            try:
-                filter_content_types = [elem for elem in query_state.focused_elements if isinstance(elem, str)]
-            except:
-                filter_content_types = None
-
-        if query_state.retrieval_strategy == RetrievalStrategy.TABLE:
-            filter_content_types = ["table"]
-        elif query_state.retrieval_strategy == RetrievalStrategy.IMAGE:
-            filter_content_types = ["figure", "image"]
-
-        # Log retrieval parameters
-        logger.info(f"Retrieval parameters: strategy={query_state.retrieval_strategy.value}, "
-                   f"filter_types={filter_content_types}, research_mode={is_research_mode}")
-
-        # Perform retrieval based on research mode
-        if is_research_mode:
-            # Multi-document retrieval for research mode
-            combined_results = []
-
-            # Create search tasks for each document
-            search_tasks = []
-
-            for pdf_id in pdf_ids:
-                if query_state.retrieval_strategy == RetrievalStrategy.SEMANTIC:
-                    # Pure semantic search
-                    search_tasks.append(vector_store.semantic_search(
-                        query=query_state.query,
-                        k=k,
-                        pdf_id=pdf_id,
-                        content_types=filter_content_types
-                    ))
-                elif query_state.retrieval_strategy == RetrievalStrategy.KEYWORD:
-                    # Keyword-based search
-                    search_tasks.append(vector_store.keyword_search(
-                        query=query_state.query,
-                        k=k,
-                        pdf_id=pdf_id
-                    ))
-                elif query_state.retrieval_strategy == RetrievalStrategy.CONCEPT:
-                    # Concept-based search
-                    search_tasks.append(vector_store.concept_search(
-                        query=query_state.query,
-                        k=k,
-                        pdf_id=pdf_id
-                    ))
-                else:
-                    # Default to hybrid search
-                    search_tasks.append(vector_store.hybrid_search(
-                        query=query_state.query,
-                        k=k,
-                        pdf_id=pdf_id,
-                        content_types=filter_content_types
-                    ))
-
-            # Execute all search tasks in parallel
-            results_by_doc = await asyncio.gather(*search_tasks)
-
-            # Process results from each document
-            for i, results in enumerate(results_by_doc):
-                curr_pdf_id = pdf_ids[i]
-
-                # Add PDF ID to results metadata if not present
-                for doc in results:
-                    # Ensure pdf_id is in metadata
-                    if not doc.metadata.get("pdf_id"):
-                        doc.metadata["pdf_id"] = curr_pdf_id
-
-                    # Add document name if available
-                    if not doc.metadata.get("document_title"):
-                        try:
-                            async with vector_store.driver.session() as session:
-                                result = await session.run(
-                                    "MATCH (d:Document {pdf_id: $pdf_id}) RETURN d.title AS title",
-                                    {"pdf_id": curr_pdf_id}
-                                )
-                                record = await result.single()
-                                if record and "title" in record:
-                                    doc.metadata["document_title"] = record["title"]
-                        except Exception as e:
-                            logger.error(f"Error fetching document title: {str(e)}")
-
-                combined_results.extend(results)
-
-            # Sort all results by score
-            combined_results.sort(key=lambda x: x.metadata.get("score", 0), reverse=True)
-
-            # Limit to top K results overall
-            results = combined_results[:k]
-        else:
-            # Single document search
-            pdf_id = pdf_ids[0] if pdf_ids else None
-
-            if query_state.retrieval_strategy == RetrievalStrategy.SEMANTIC:
-                # Pure semantic search
-                results = await vector_store.semantic_search(
-                    query=query_state.query,
-                    k=k,
-                    pdf_id=pdf_id,
-                    content_types=filter_content_types
-                )
-            elif query_state.retrieval_strategy == RetrievalStrategy.KEYWORD:
-                # Keyword-based search
-                results = await vector_store.keyword_search(
-                    query=query_state.query,
-                    k=k,
-                    pdf_id=pdf_id
-                )
-            elif query_state.retrieval_strategy == RetrievalStrategy.CONCEPT:
-                # Concept-based search
-                results = await vector_store.concept_search(
-                    query=query_state.query,
-                    k=k,
-                    pdf_id=pdf_id
-                )
-            else:
-                # Default to hybrid search
-                results = await vector_store.hybrid_search(
-                    query=query_state.query,
-                    k=k,
-                    pdf_id=pdf_id,
-                    content_types=filter_content_types
-                )
-
-        # Record timing metrics
-        retrieval_time = (datetime.utcnow() - start_time).total_seconds()
-
-        # Transform results into standard ContentElement format
-        elements = []
-        sources = []
-
-        for doc in results:
-            # Extract metadata
-            metadata = doc.metadata
-            pdf_id = metadata.get("pdf_id", "")
-
-            # Determine content type - default to text if not specified
-            content_type_str = metadata.get("content_type", "text")
-            try:
-                content_type = ContentType(content_type_str)
-            except:
-                content_type = ContentType.TEXT
-
-            # Create ContentElement
-            element = ContentElement(
-                id=metadata.get("id", ""),
-                element_id=metadata.get("id", ""),
-                content=doc.page_content,
-                content_type=content_type,
-                pdf_id=pdf_id,
-                page=metadata.get("page_number", 0),
-                metadata={
-                    "score": metadata.get("score", 0.0),
-                    "section": metadata.get("section", ""),
-                    "section_title": metadata.get("section_title", ""),
-                    "document_title": metadata.get("document_title", f"Document {pdf_id}"),
-                    "chunk_id": metadata.get("chunk_id", metadata.get("id", "")),
-                }
-            )
-            elements.append(element)
-
-            # Add to sources for citation tracking
-            sources.append({
-                "id": metadata.get("id", ""),
-                "pdf_id": pdf_id,
-                "page_number": metadata.get("page_number", 0),
-                "section": metadata.get("section", ""),
-                "section_title": metadata.get("section_title", ""),
-                "score": metadata.get("score", 0.0),
-                "document_title": metadata.get("document_title", f"Document {pdf_id}")
-            })
-
-        # Update retrieval state
-        retrieval_state.elements = elements
-        retrieval_state.sources = sources
-        retrieval_state.metadata["retrieval_time"] = retrieval_time
-        retrieval_state.metadata["total_results"] = len(elements)
-        retrieval_state.metadata["strategy"] = query_state.retrieval_strategy.value
-        retrieval_state.metadata["research_mode"] = is_research_mode
-
-        logger.info(f"Retrieval complete: found {len(elements)} relevant elements in {retrieval_time:.2f}s")
-
-    except Exception as e:
-        error_msg = f"Error during retrieval: {str(e)}"
-        logger.error(error_msg)
-        logger.exception(e)
-        retrieval_state.metadata["error"] = error_msg
-
-    return retrieval_state
 
 def retrieve_content(state: GraphState) -> GraphState:
     """
     Retrieve content based on query analysis.
-    This function properly handles event loops to prevent the 'Future attached to a different loop' error.
+    Simplified implementation with proper connection handling.
 
     Args:
         state: Current graph state
@@ -275,52 +26,159 @@ def retrieve_content(state: GraphState) -> GraphState:
     """
     # Validate state
     if not state.query_state:
-        raise ValueError("Query state is required for retrieval")
+        logger.error("Query state is required for retrieval")
+        return state
+
+    query = state.query_state.query
+    pdf_ids = state.query_state.pdf_ids or []
+    retrieval_strategy = state.query_state.retrieval_strategy
+    focused_elements = state.query_state.focused_elements
+
+    logger.info(f"Retrieval started: strategy={retrieval_strategy}, pdf_ids={pdf_ids}")
 
     try:
-        # Create a new event loop specifically for this function call
-        retrieval_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(retrieval_loop)
+        # Get content filter types if specified
+        content_types = None
+        if focused_elements:
+            # Convert element strings to proper content types
+            content_types = [elem for elem in focused_elements if isinstance(elem, str)]
 
-        try:
-            # Run the async retrieval in this dedicated loop
-            retrieval_state = retrieval_loop.run_until_complete(_retrieve_content_async(state.query_state))
+        # Get vector store instance
+        vector_store = get_vector_store()
 
-            # Update the graph state with the retrieval results
-            updated_state = state.model_copy()
-            updated_state.retrieval_state = retrieval_state
+        # Validate PDF IDs
+        if not pdf_ids or len(pdf_ids) == 0:
+            logger.warning("No PDF IDs provided for retrieval")
+            state.retrieval_state = RetrievalState(
+                elements=[],
+                sources=[],
+                metadata={"error": "No PDF IDs provided for retrieval"},
+                strategies_used=[retrieval_strategy.value]
+            )
+            return state
 
-            return updated_state
+        # Determine if we have multiple PDFs (research mode)
+        is_research_mode = len(pdf_ids) > 1
 
-        finally:
-            # Clean up any pending tasks
-            pending_tasks = [task for task in asyncio.all_tasks(retrieval_loop)
-                             if not task.done()]
+        # Set up retrieval parameters
+        k = 10  # Number of results to return
 
-            if pending_tasks:
-                # Cancel all pending tasks
-                for task in pending_tasks:
-                    task.cancel()
+        # Prepare to collect results
+        all_results = []
 
-                # Wait for tasks to cancel with a timeout
-                retrieval_loop.run_until_complete(
-                    asyncio.wait(pending_tasks, timeout=1.0))
+        # Process each PDF ID
+        for pdf_id in pdf_ids:
+            # Choose retrieval method based on strategy
+            if retrieval_strategy == RetrievalStrategy.SEMANTIC:
+                logger.info(f"Using semantic search for {pdf_id}")
+                results = vector_store.semantic_search(
+                    query=query,
+                    k=k,
+                    pdf_id=pdf_id,
+                    content_types=content_types
+                )
+            elif retrieval_strategy == RetrievalStrategy.KEYWORD:
+                logger.info(f"Using keyword search for {pdf_id}")
+                results = vector_store.keyword_search(
+                    query=query,
+                    k=k,
+                    pdf_id=pdf_id
+                )
+            else:
+                # Default to hybrid search
+                logger.info(f"Using hybrid search for {pdf_id}")
+                results = vector_store.hybrid_search(
+                    query=query,
+                    k=k,
+                    pdf_id=pdf_id,
+                    content_types=content_types
+                )
 
-            # Close the loop
-            retrieval_loop.close()
+            # Add document title if available
+            for doc in results:
+                # Ensure pdf_id is in metadata
+                if not doc.metadata.get("pdf_id"):
+                    doc.metadata["pdf_id"] = pdf_id
+
+            # Add to combined results
+            all_results.extend(results)
+
+        # Sort results by score if we have multiple documents
+        if is_research_mode and len(all_results) > 0:
+            all_results.sort(key=lambda x: x.metadata.get("score", 0), reverse=True)
+
+        # Limit results
+        all_results = all_results[:k]
+
+        # Transform results into standard ContentElement format
+        elements = []
+        sources = []
+
+        for doc in all_results:
+            # Extract metadata
+            metadata = doc.metadata
+            doc_pdf_id = metadata.get("pdf_id", "")
+
+            # Determine content type
+            content_type_str = metadata.get("content_type", "text")
+
+            try:
+                content_type = ContentType(content_type_str)
+            except:
+                content_type = ContentType.TEXT
+
+            # Create element dictionary (simpler than full ContentElement)
+            element = {
+                "id": metadata.get("id", ""),
+                "element_id": metadata.get("id", ""),
+                "content": doc.page_content,
+                "content_type": content_type.value,
+                "pdf_id": doc_pdf_id,
+                "page": metadata.get("page_number", 0),
+                "metadata": {
+                    "score": metadata.get("score", 0.0),
+                    "section": metadata.get("section", ""),
+                    "content_type": content_type_str,
+                    "document_title": metadata.get("document_title", f"Document {doc_pdf_id}")
+                }
+            }
+
+            elements.append(element)
+
+            # Add to sources for citation tracking
+            sources.append({
+                "id": metadata.get("id", ""),
+                "pdf_id": doc_pdf_id,
+                "page_number": metadata.get("page_number", 0),
+                "section": metadata.get("section", ""),
+                "score": metadata.get("score", 0.0),
+                "document_title": metadata.get("document_title", f"Document {doc_pdf_id}")
+            })
+
+        # Create retrieval state
+        state.retrieval_state = RetrievalState(
+            elements=elements,
+            sources=sources,
+            strategies_used=[retrieval_strategy.value],
+            metadata={
+                "retrieval_time": datetime.now().isoformat(),
+                "total_results": len(elements),
+                "strategy": retrieval_strategy.value,
+                "research_mode": is_research_mode
+            }
+        )
+
+        logger.info(f"Retrieval complete: found {len(elements)} elements")
 
     except Exception as e:
         logger.error(f"Error in retrieval: {str(e)}", exc_info=True)
 
         # Create a minimal retrieval state with error information
-        error_retrieval_state = RetrievalState(
+        state.retrieval_state = RetrievalState(
             elements=[],
             sources=[],
+            strategies_used=[retrieval_strategy.value] if retrieval_strategy else [],
             metadata={"error": str(e)}
         )
 
-        # Update state with error information
-        updated_state = state.model_copy()
-        updated_state.retrieval_state = error_retrieval_state
-
-        return updated_state
+    return state

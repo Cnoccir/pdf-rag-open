@@ -1,14 +1,14 @@
 """
 SQL-based memory manager for conversation persistence.
+Simplified implementation with sync interfaces.
 """
 
 import logging
-import asyncio
+import json
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
 import uuid
 import traceback
-import sys
 
 from app.chat.langgraph.state import ConversationState, MessageType
 from app.web.db.models import Conversation as DBConversation, Message as DBMessage
@@ -23,7 +23,7 @@ class MemoryManager:
         """Initialize memory manager"""
         logger.info("SQL-based Memory manager initialized")
 
-    async def get_conversation(self, conversation_id: str) -> Optional[ConversationState]:
+    def get_conversation(self, conversation_id: str) -> Optional[ConversationState]:
         """
         Get conversation state by ID from SQL database
 
@@ -70,8 +70,8 @@ class MemoryManager:
                     }
                     msg_type = type_mapping.get(msg.role.lower(), MessageType.USER)
 
-                # Get or create message metadata
-                metadata = msg.msg_metadata or {}
+                # Get message metadata
+                metadata = msg.msg_metadata if hasattr(msg, 'msg_metadata') else msg.get_metadata() if hasattr(msg, 'get_metadata') else {}
 
                 # Add message to conversation state
                 conv_state.add_message(
@@ -90,12 +90,8 @@ class MemoryManager:
             return conv_state
 
         except Exception as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
             logger.error(f"Error loading conversation {conversation_id}: {str(e)}")
-            logger.error("Exception traceback:")
-            traceback_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
-            for line in traceback_lines:
-                logger.error(line.rstrip())
+            logger.error(traceback.format_exc())
 
             # Create a new conversation as recovery mechanism
             try:
@@ -108,7 +104,7 @@ class MemoryManager:
             except:
                 return None
 
-    async def save_conversation(self, conversation: ConversationState) -> bool:
+    def save_conversation(self, conversation: ConversationState) -> bool:
         """
         Save conversation state to SQL database
 
@@ -129,7 +125,7 @@ class MemoryManager:
             ).scalar_one_or_none()
 
             if not db_conversation:
-                # Get PDF ID as int if possible
+                # Get PDF ID (handle string PDF IDs)
                 try:
                     pdf_id = int(conversation.pdf_id) if conversation.pdf_id else None
                 except (ValueError, TypeError):
@@ -156,7 +152,7 @@ class MemoryManager:
                 # Update existing conversation
                 db_conversation.title = conversation.title or db_conversation.title
                 db_conversation.json_metadata = conversation.metadata or db_conversation.json_metadata
-                db_conversation.last_updated = datetime.utcnow()
+                db_conversation.last_updated = datetime.now()
 
             # Commit to save conversation and get ID
             db.session.commit()
@@ -177,17 +173,29 @@ class MemoryManager:
                 if msg.content in existing_messages:
                     # Update metadata if needed
                     existing_msg = existing_messages[msg.content]
-                    if msg.metadata and msg.metadata != existing_msg.msg_metadata:
-                        existing_msg.msg_metadata = msg.metadata
+                    if msg.metadata:
+                        # Check which metadata setting function is available
+                        if hasattr(existing_msg, 'msg_metadata'):
+                            existing_msg.msg_metadata = msg.metadata
+                        elif hasattr(existing_msg, 'set_metadata'):
+                            existing_msg.set_metadata(msg.metadata)
                         db.session.add(existing_msg)
                 else:
                     # Create new message
                     new_message = DBMessage(
                         conversation_id=db_conversation.id,
                         role=msg_type,
-                        content=msg.content,
-                        meta_json=msg.metadata if msg.metadata else {}
+                        content=msg.content
                     )
+
+                    # Set metadata using available function
+                    if hasattr(new_message, 'msg_metadata'):
+                        new_message.msg_metadata = msg.metadata
+                    elif hasattr(new_message, 'set_metadata'):
+                        new_message.set_metadata(msg.metadata)
+                    elif hasattr(new_message, 'meta_json'):
+                        new_message.meta_json = json.dumps(msg.metadata)
+
                     db.session.add(new_message)
 
             # Commit changes
@@ -197,18 +205,14 @@ class MemoryManager:
             return True
 
         except Exception as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
             logger.error(f"Error saving conversation {conversation.conversation_id}: {str(e)}")
-            logger.error("Exception traceback:")
-            traceback_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
-            for line in traceback_lines:
-                logger.error(line.rstrip())
+            logger.error(traceback.format_exc())
 
             # Roll back transaction
             db.session.rollback()
             return False
 
-    async def list_conversations(self, pdf_id: Optional[str] = None) -> List[ConversationState]:
+    def list_conversations(self, pdf_id: Optional[str] = None) -> List[ConversationState]:
         """
         List all available conversations, optionally filtered by PDF ID
 
@@ -238,7 +242,7 @@ class MemoryManager:
             # Execute query
             conversations = db.session.execute(query).scalars().all()
 
-            # Convert to conversation states (minimal version without full message loading for performance)
+            # Convert to conversation states (minimal version for performance)
             result = []
             for conv in conversations:
                 # Create simplified conversation state
@@ -285,20 +289,16 @@ class MemoryManager:
             return result
 
         except Exception as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
             logger.error(f"Error listing conversations: {str(e)}")
-            logger.error("Exception traceback:")
-            traceback_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
-            for line in traceback_lines:
-                logger.error(line.rstrip())
+            logger.error(traceback.format_exc())
             return []
 
-    async def create_conversation(
+    def create_conversation(
         self,
-        title: str = None,
-        pdf_id: str = None,
-        metadata: Dict[str, Any] = None,
-        id: str = None
+        title: Optional[str] = None,
+        pdf_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        id: Optional[str] = None
     ) -> ConversationState:
         """
         Create a new conversation
@@ -325,9 +325,50 @@ class MemoryManager:
             # Initialize metadata with defaults if not provided
             if not metadata:
                 metadata = {
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": datetime.now().isoformat(),
                     "pdf_id": pdf_id
                 }
+
+            # Create database entry
+            try:
+                # Get PDF ID (handle string PDF IDs)
+                try:
+                    pdf_id_val = int(pdf_id) if pdf_id else None
+                except (ValueError, TypeError):
+                    pdf_id_val = pdf_id
+
+                # Get user ID from metadata
+                user_id = metadata.get("user_id")
+                if not user_id:
+                    # Get the first user as fallback
+                    from app.web.db.models import User
+                    user = db.session.execute(db.select(User).limit(1)).scalar_one_or_none()
+                    user_id = user.id if user else 1
+
+                # Create DB conversation
+                db_conversation = DBConversation(
+                    id=conversation_id,
+                    title=title,
+                    pdf_id=pdf_id_val,
+                    user_id=user_id,
+                    json_metadata=metadata
+                )
+                db.session.add(db_conversation)
+
+                # Add system message
+                system_message = DBMessage(
+                    conversation_id=conversation_id,
+                    role="system",
+                    content="You are an AI assistant specialized in answering questions about documents."
+                )
+                db.session.add(system_message)
+
+                # Commit changes
+                db.session.commit()
+
+            except Exception as db_error:
+                logger.error(f"Database error creating conversation: {str(db_error)}")
+                db.session.rollback()
 
             # Create new conversation state
             conversation = ConversationState(
@@ -337,25 +378,24 @@ class MemoryManager:
                 metadata=metadata
             )
 
-            # Add system message by default
+            # Add system message
             system_prompt = "You are an AI assistant specialized in answering questions about documents."
             conversation.add_message(MessageType.SYSTEM, system_prompt)
-
-            # Save to database
-            await self.save_conversation(conversation)
 
             return conversation
 
         except Exception as e:
-            exc_type, exc_value, exc_traceback = sys.exc_info()
             logger.error(f"Error creating conversation: {str(e)}")
-            logger.error("Exception traceback:")
-            traceback_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
-            for line in traceback_lines:
-                logger.error(line.rstrip())
-            raise
+            logger.error(traceback.format_exc())
 
-    async def delete_conversation(self, conversation_id: str) -> bool:
+            # Return a minimal conversation state
+            return ConversationState(
+                conversation_id=id or str(uuid.uuid4()),
+                title=title or "New Conversation",
+                metadata={"error": str(e)}
+            )
+
+    def delete_conversation(self, conversation_id: str) -> bool:
         """
         Delete a conversation using soft delete approach
 
@@ -384,7 +424,7 @@ class MemoryManager:
 
             if isinstance(conversation.json_metadata, dict):
                 conversation.json_metadata["is_deleted"] = True
-                conversation.json_metadata["deleted_at"] = datetime.utcnow().isoformat()
+                conversation.json_metadata["deleted_at"] = datetime.now().isoformat()
 
             # Commit changes
             db.session.commit()

@@ -1,61 +1,37 @@
 """
 Conversation memory node for LangGraph-based PDF RAG system.
-This node handles conversation history management and technical concept extraction.
+Handles conversation history management and technical concept extraction.
 """
 
 import logging
-from typing import Dict, List, Any, Optional
 import re
+from typing import Dict, List, Any
+from datetime import datetime
 
 from app.chat.langgraph.state import GraphState, MessageType
+from app.chat.utils.extraction import extract_technical_terms
 
 logger = logging.getLogger(__name__)
-
-
-def extract_technical_terms(text: str) -> List[str]:
-    """
-    Extract technical terms from text.
-    This is a simplified implementation that could be enhanced with ML/NLP techniques.
-
-    Args:
-        text: Text to extract terms from
-
-    Returns:
-        List of technical terms
-    """
-    # Simple pattern matching for technical terms (words with digits, acronyms, etc.)
-    patterns = [
-        r'\b[A-Z][A-Z0-9]+\b',                   # Acronyms like PDF, HTTP, API
-        r'\b[A-Za-z]+\d+[A-Za-z0-9]*\b',         # Technical codes like GPT3, T5, B2B
-        r'\b[a-z]+[-_][a-z]+\b',                 # Hyphenated terms like machine-learning
-    ]
-
-    terms = set()
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        terms.update(matches)
-
-    return list(terms)
 
 def process_conversation_memory(state: GraphState) -> GraphState:
     """
     Process conversation memory and extract technical concepts.
-    This node maintains conversation context and extracts technical terms.
+    Maintains conversation context and tracks message history.
 
     Args:
         state: Current graph state
 
     Returns:
-        Updated graph state
+        Updated graph state with conversation memory
     """
     # Initialize conversation state if not present
     if not state.conversation_state:
+        logger.warning("No conversation state found, creating new one")
         from app.chat.langgraph.state import ConversationState
         state.conversation_state = ConversationState()
-        logger.info("Initialized new conversation state")
 
     # Initialize metadata to track processing status
-    if not hasattr(state.conversation_state, "metadata") or not state.conversation_state.metadata:
+    if not state.conversation_state.metadata:
         state.conversation_state.metadata = {}
 
     # Track cycling to prevent infinite loops
@@ -63,7 +39,7 @@ def process_conversation_memory(state: GraphState) -> GraphState:
     state.conversation_state.metadata["cycle_count"] = cycle_count + 1
 
     # If we've processed too many cycles, mark as complete to end graph
-    if cycle_count > 5:
+    if cycle_count > 3:
         state.conversation_state.metadata["processed_response"] = True
         logger.warning(f"Forcing end of processing after {cycle_count} cycles")
         return state
@@ -77,19 +53,29 @@ def process_conversation_memory(state: GraphState) -> GraphState:
 
         # Update the conversation state with these technical terms
         if response_terms:
-            state.conversation_state.technical_concepts.extend(
-                [term for term in response_terms if term not in state.conversation_state.technical_concepts]
-            )
+            for term in response_terms:
+                if term not in state.conversation_state.technical_concepts:
+                    state.conversation_state.technical_concepts.append(term)
 
         # Add the AI response to conversation history
+        metadata = {}
+        if hasattr(state.generation_state, "citations") and state.generation_state.citations:
+            metadata["citations"] = state.generation_state.citations
+
+        if hasattr(state.generation_state, "metadata") and state.generation_state.metadata:
+            for key, value in state.generation_state.metadata.items():
+                if key not in metadata:
+                    metadata[key] = value
+
         state.conversation_state.add_message(
-            MessageType.AI,
+            MessageType.ASSISTANT,
             state.generation_state.response,
-            {"citations": state.generation_state.citations if hasattr(state.generation_state, "citations") else []}
+            metadata
         )
 
         # Mark the response as processed
         state.conversation_state.metadata["processed_response"] = True
+
         # Reset cycle count after processing
         state.conversation_state.metadata["cycle_count"] = 0
 
@@ -99,10 +85,13 @@ def process_conversation_memory(state: GraphState) -> GraphState:
     # Add system message if not already present and no processed_response flag
     if not state.conversation_state.metadata.get("processed_response", False):
         if not any(msg.type == MessageType.SYSTEM for msg in state.conversation_state.messages):
-            # Default system prompt if not specified
-            system_prompt = state.conversation_state.system_prompt if hasattr(state.conversation_state, "system_prompt") else (
-                "You are an AI assistant specialized in answering questions about technical documents."
-            )
+            # Default system prompt
+            system_prompt = "You are an AI assistant specialized in answering questions about technical documents."
+
+            # Enhance with research mode if applicable
+            if state.query_state and state.query_state.pdf_ids and len(state.query_state.pdf_ids) > 1:
+                system_prompt += "\n\nYou are in RESEARCH MODE, which means you should synthesize information across multiple documents and highlight connections between concepts."
+
             state.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
             logger.info("Added system message to conversation")
 
@@ -113,16 +102,17 @@ def process_conversation_memory(state: GraphState) -> GraphState:
 
             # Update the conversation state with these technical terms
             if technical_terms:
-                state.conversation_state.technical_concepts.extend(
-                    [term for term in technical_terms if term not in state.conversation_state.technical_concepts]
-                )
+                for term in technical_terms:
+                    if term not in state.conversation_state.technical_concepts:
+                        state.conversation_state.technical_concepts.append(term)
+
                 logger.info(f"Extracted technical terms: {technical_terms}")
 
                 # Also add them to query state for current retrieval
                 if state.query_state:
-                    state.query_state.concepts.extend(
-                        [term for term in technical_terms if term not in state.query_state.concepts]
-                    )
+                    for term in technical_terms:
+                        if term not in state.query_state.concepts:
+                            state.query_state.concepts.append(term)
 
             # Add the human message to conversation history if not already there
             # Use message content comparison to avoid duplicates
@@ -134,5 +124,12 @@ def process_conversation_memory(state: GraphState) -> GraphState:
             if not is_duplicate:
                 state.conversation_state.add_message(MessageType.USER, state.query_state.query)
                 logger.info(f"Added human message to conversation history: {state.query_state.query[:50]}...")
+
+                # Ensure PDF ID is properly set
+                if not state.conversation_state.pdf_id and state.query_state.pdf_ids:
+                    state.conversation_state.pdf_id = state.query_state.pdf_ids[0]
+
+    # Store conversation update timestamp
+    state.conversation_state.updated_at = datetime.now()
 
     return state
