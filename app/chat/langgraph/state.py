@@ -1,6 +1,6 @@
 """
 State definitions for the PDF RAG LangGraph implementation.
-These models define the data structures passed between LangGraph nodes.
+Updated for MongoDB + Qdrant integration with multi-level chunking.
 """
 
 from typing import Dict, List, Optional, Any, Union, Set
@@ -8,6 +8,8 @@ from enum import Enum
 from datetime import datetime
 import uuid
 from pydantic import BaseModel, Field
+
+from app.chat.types import ChunkLevel, EmbeddingType, ContentType
 
 # -----------------------
 # Type Definitions
@@ -25,16 +27,7 @@ class RetrievalStrategy(str, Enum):
     KEYWORD = "keyword"       # Keyword-based search
     HYBRID = "hybrid"         # Combination of semantic and keyword
     CONCEPT = "concept"       # Concept-based navigation
-
-class ContentType(str, Enum):
-    """Content types in documents."""
-    TEXT = "text"
-    TABLE = "table"
-    IMAGE = "image"
-    CODE = "code"
-    EQUATION = "equation"
-    DIAGRAM = "diagram"
-    PAGE = "page"
+    PROCEDURE = "procedure"   # Procedure-focused retrieval
 
 # -----------------------
 # Message Models
@@ -102,12 +95,32 @@ class QueryState(BaseModel):
     keywords: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+    # Multi-level chunking preferences
+    preferred_chunk_level: Optional[ChunkLevel] = None
+
+    # Multi-embedding preferences
+    preferred_embedding_type: Optional[EmbeddingType] = None
+
+    # Procedure-specific fields
+    procedure_focused: bool = False
+    parameter_query: bool = False
+
 class RetrievalState(BaseModel):
     """State for retrieval results"""
     elements: List[Dict[str, Any]] = Field(default_factory=list)
     sources: List[Dict[str, Any]] = Field(default_factory=list)
     strategies_used: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    # New fields for multi-level chunking
+    chunk_levels_used: List[str] = Field(default_factory=list)
+
+    # New fields for multi-embedding
+    embedding_types_used: List[str] = Field(default_factory=list)
+
+    # Procedure-specific fields
+    procedures_retrieved: List[Dict[str, Any]] = Field(default_factory=list)
+    parameters_retrieved: List[Dict[str, Any]] = Field(default_factory=list)
 
 class GenerationState(BaseModel):
     """State for response generation"""
@@ -116,12 +129,16 @@ class GenerationState(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     token_usage: Dict[str, int] = Field(default_factory=dict)
 
+    # New field for procedure step breakdown
+    procedure_steps: List[Dict[str, Any]] = Field(default_factory=list)
+
 class ResearchState(BaseModel):
     """State for multi-document research"""
     query_state: Optional[QueryState] = None
     cross_references: List[Dict[str, Any]] = Field(default_factory=list)
     insights: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    research_context: Any = None  # Will hold ResearchContext from types.py
 
 # -----------------------
 # Combined Graph State

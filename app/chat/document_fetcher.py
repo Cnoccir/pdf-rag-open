@@ -1,6 +1,6 @@
 """
-Enhanced document processor with Neo4j vector store integration.
-Handles document extraction, processing, and ingestion for LangGraph RAG system.
+Enhanced document processor with MongoDB + Qdrant integration.
+Provides multi-level chunking and multi-embedding strategies.
 """
 
 import asyncio
@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union, Set, Iterator
 
 from openai import AsyncOpenAI
+import tiktoken
 
 # Docling imports
 from docling_core.types.doc import (
@@ -40,20 +41,28 @@ from docling.document_converter import (
 )
 from docling.chunking import HybridChunker, BaseChunk
 
-# OCR options imports
-from docling.datamodel.pipeline_options import (
-    EasyOcrOptions,
-    TesseractOcrOptions,
-    TableStructureOptions
+# Import from the new types module
+from app.chat.types import (
+    ContentType,
+    ChunkLevel,
+    EmbeddingType,
+    ProcessingResult,
+    ContentElement,
+    ContentMetadata,
+    ProcessingConfig,
+    DocumentChunk,
+    ChunkMetadata,
+    ConceptNetwork,
+    ConceptRelationship,
+    Concept,
+    RelationType
 )
 
-from langchain_core.documents import Document
-
-# Import from modular utils
-from app.chat.utils.extraction import DOMAIN_SPECIFIC_TERMS
+# Import from utility modules
 from app.chat.utils.extraction import (
     extract_technical_terms,
-    extract_document_relationships
+    extract_document_relationships,
+    extract_procedures_and_parameters  # New utility function for procedures
 )
 from app.chat.utils.tokenization import get_tokenizer
 from app.chat.utils.document import (
@@ -65,32 +74,18 @@ from app.chat.utils.processing import (
     normalize_pdf_id
 )
 
-from app.chat.types import (
-    ContentType,
-    ProcessingResult,
-    ContentElement,
-    ContentMetadata,
-    ProcessingConfig,
-    ImageMetadata,
-    ImageFeatures,
-    ImageAnalysis,
-    ImagePaths,
-    TableData,
-    ConceptNetwork,
-    ConceptRelationship,
-    Concept,
-    RelationType
-)
+# Import the new unified store
+from app.chat.vector_stores import get_vector_store, get_mongo_store, get_qdrant_store
+
+# Import errors
 from app.chat.errors import DocumentProcessingError
-from app.chat.vector_stores import get_vector_store
 
 logger = logging.getLogger(__name__)
 
 class DocumentProcessor:
     """
-    Enhanced document processor with Neo4j integration.
-    Focuses on preserving document structure, domain knowledge integration,
-    and hierarchical relationships for technical documentation.
+    Enhanced document processor with MongoDB + Qdrant integration.
+    Provides multi-level chunking and multi-embedding strategies.
     """
 
     def __init__(self, pdf_id: str, config: ProcessingConfig, openai_client: AsyncOpenAI, research_manager=None):
@@ -105,23 +100,35 @@ class DocumentProcessor:
         self.markdown_path = self.output_dir / "content" / "document.md"
         self.docling_doc = None
         self.conversion_result = None
-        self.concept_network = ConceptNetwork()
+        self.concept_network = ConceptNetwork(pdf_id=self.pdf_id)
 
         # Track section hierarchy during processing
         self.section_hierarchy = []
         self.section_map = {}  # Maps section titles to their level
         self.element_section_map = {}  # Maps element IDs to their section context
 
+        # Track extracted procedures and parameters
+        self.procedures = []
+        self.parameters = []
+
+        # Initialize tokenizer for chunking
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")  # For OpenAI models
+
         # Domain-specific counters to detect document type and primary concepts
         self.domain_term_counters = defaultdict(int)
 
-        logger.info(f"Initialized DocumentProcessor for PDF {pdf_id} with config: {config.dict(exclude={'embedding_dimensions'})}")
+        # Get database stores
+        self.vector_store = get_vector_store()
+        self.mongo_store = get_mongo_store()
+        self.qdrant_store = get_qdrant_store()
+
+        logger.info(f"Initialized DocumentProcessor for PDF {pdf_id} with config: {config}")
 
     async def process_document(self) -> ProcessingResult:
         """
-        Process document with Neo4j integration for relationship preservation.
+        Process document with MongoDB + Qdrant integration.
         Preserves document structure and extracts rich metadata.
-        Enhanced with document summarization and category detection.
+        Enhanced with multi-level chunking and multi-embedding strategy.
         """
         logger.info(f"Starting enhanced document processing for {self.pdf_id}")
         start_time = time.time()
@@ -145,21 +152,25 @@ class DocumentProcessor:
             logger.info(f"Extracting content elements from {self.pdf_id}")
             elements = await self._extract_content_elements(self.docling_doc)
 
-            # 5. Generate optimized chunks using Docling's HybridChunker
-            logger.info(f"Generating optimized chunks for {self.pdf_id}")
-            chunks = self._generate_chunks(self.docling_doc)
+            # 5. Extract procedures and parameters if enabled
+            if self.config.extract_procedures:
+                logger.info(f"Extracting procedures and parameters from {self.pdf_id}")
+                procedures, parameters = await self._extract_procedures_and_parameters(elements, md_content)
+                self.procedures = procedures
+                self.parameters = parameters
 
-            # 6. Build concept network from document content
+            # 6. Generate optimized chunks using multi-level chunking
+            logger.info(f"Generating optimized chunks for {self.pdf_id}")
+            chunks = await self._generate_multi_level_chunks(elements, md_content)
+
+            # 7. Build concept network from document content
             logger.info(f"Building concept network for {self.pdf_id}")
             await self._build_concept_network(elements, chunks)
-
-            # 7. Create processing result with comprehensive metadata
-            visual_elements = [e for e in elements if e.content_type == ContentType.IMAGE]
 
             # 8. Extract all technical terms for document summary
             all_technical_terms = self._extract_all_technical_terms(elements)
 
-            # 9. Generate an enhanced document summary using LLM where possible
+            # 9. Generate an enhanced document summary using LLM
             logger.info(f"Generating enhanced document summary for {self.pdf_id}")
             document_summary = await generate_document_summary(
                 text=md_content,
@@ -172,7 +183,13 @@ class DocumentProcessor:
             predicted_category = self._predict_document_category(all_technical_terms, md_content)
             logger.info(f"Predicted document category: {predicted_category}")
 
-            # 11. Create processing result
+            # 11. Store processed content in MongoDB + Qdrant
+            logger.info(f"Ingesting content to MongoDB + Qdrant for {self.pdf_id}")
+            await self._ingest_to_unified_store(elements, chunks, document_summary, predicted_category)
+
+            # 12. Create processing result
+            visual_elements = [e for e in elements if e.content_type == ContentType.IMAGE]
+
             result = ProcessingResult(
                 pdf_id=self.pdf_id,
                 elements=elements,
@@ -182,12 +199,10 @@ class DocumentProcessor:
                 markdown_path=str(self.markdown_path),
                 concept_network=self.concept_network,
                 visual_elements=visual_elements,
-                document_summary=document_summary  # Added document summary
+                document_summary=document_summary,
+                procedures=self.procedures,
+                parameters=self.parameters
             )
-
-            # 12. Store processed content in Neo4j vector store
-            logger.info(f"Ingesting content to Neo4j for {self.pdf_id}")
-            await self._ingest_to_neo4j(result)
 
             # 13. Update PDF metadata in database with enhanced summary and description
             await self._update_pdf_metadata(document_summary, predicted_category)
@@ -195,15 +210,7 @@ class DocumentProcessor:
             # 14. Register document metadata with research manager if available
             if self.research_manager:
                 document_stats = result.get_statistics()
-
-                # Get description for research context
-                description = ""
-                if document_summary.get('description'):
-                    description = document_summary['description']
-                elif document_summary.get('key_insights') and document_summary['key_insights']:
-                    description = document_summary['key_insights'][0]
-
-                self.research_manager.add_document_metadata(self.pdf_id, {
+                self._handle_research_manager_integration(document_summary.get('title', f"Document {self.pdf_id}"), {
                     "total_elements": len(elements),
                     "content_types": document_stats["element_types"],
                     "technical_terms": set(document_stats["top_technical_terms"].keys()),
@@ -213,12 +220,14 @@ class DocumentProcessor:
                         "total_relationships": len(self.concept_network.relationships),
                         "primary_concepts": self.concept_network.primary_concepts
                     },
+                    "procedures": len(self.procedures),
+                    "parameters": len(self.parameters),
                     "top_technical_terms": list(document_stats["top_technical_terms"].keys())[:20],
                     "domain_category": predicted_category,
-                    "description": description
+                    "description": document_summary.get('description', '')
                 })
 
-            # 15. Save results with optimized storage
+            # 15. Save results to disk
             await self._save_results(result)
 
             # Record total processing time
@@ -361,7 +370,9 @@ class DocumentProcessor:
                         pdf_id=self.pdf_id,
                         page_number=page_no,
                         content_type=ContentType.PAGE,
-                        hierarchy_level=0
+                        hierarchy_level=0,
+                        chunk_level=ChunkLevel.DOCUMENT,  # Always document level for pages
+                        embedding_type=EmbeddingType.GENERAL
                     )
                 )
                 elements.append(page_element)
@@ -411,16 +422,15 @@ class DocumentProcessor:
                         hierarchy_level=level,
                         technical_terms=technical_terms,
                         section_headers=list(current_section_path),
+                        chunk_level=ChunkLevel.SECTION,  # Headers are section level
+                        embedding_type=EmbeddingType.CONCEPTUAL,
+                        parent_element_id=page_map.get(page_number)
                     )
                 )
 
                 # Store section mapping for this element
                 self.element_section_map[hdr_id] = list(current_section_path)
                 self.section_map[section_title] = level
-
-                # Link to page parent if applicable
-                if page_number in page_map:
-                    hdr_element.metadata.parent_element = page_map[page_number]
 
                 elements.append(hdr_element)
 
@@ -442,15 +452,15 @@ class DocumentProcessor:
                 if table_element:
                     # Parent the table to its page
                     if page_number in page_map:
-                        table_element.metadata.parent_element = page_map[page_number]
+                        table_element.metadata.parent_element_id = page_map[page_number]
                     elements.append(table_element)
 
                     # Store section mapping
                     self.element_section_map[table_element.element_id] = list(current_section_path)
 
                     # Track domain-specific terms
-                    if table_element.metadata.table_data and table_element.metadata.table_data.caption:
-                        self._track_domain_terms(table_element.metadata.table_data.caption)
+                    if table_element.metadata.table_data and table_element.metadata.table_data.get("caption"):
+                        self._track_domain_terms(table_element.metadata.table_data["caption"])
 
             elif isinstance(item, PictureItem):
                 pic_element = self._process_picture_item(
@@ -462,15 +472,15 @@ class DocumentProcessor:
                 if pic_element:
                     # Parent the picture to its page
                     if page_number in page_map:
-                        pic_element.metadata.parent_element = page_map[page_number]
+                        pic_element.metadata.parent_element_id = page_map[page_number]
                     elements.append(pic_element)
 
                     # Store section mapping
                     self.element_section_map[pic_element.element_id] = list(current_section_path)
 
                     # Track domain-specific terms in image descriptions
-                    if pic_element.metadata.image_metadata and pic_element.metadata.image_metadata.analysis.description:
-                        self._track_domain_terms(pic_element.metadata.image_metadata.analysis.description)
+                    if pic_element.metadata.image_metadata and pic_element.metadata.image_metadata.get("description"):
+                        self._track_domain_terms(pic_element.metadata.image_metadata["description"])
 
             elif isinstance(item, TextItem):
                 # skip empty text
@@ -484,6 +494,12 @@ class DocumentProcessor:
                 if self.config.extract_technical_terms:
                     technical_terms = extract_technical_terms(item.text)
 
+                # Determine chunk level based on content
+                chunk_level = self._determine_chunk_level(item.text, level, current_section_path)
+
+                # Determine embedding type based on content
+                embedding_type = self._determine_embedding_type(item.text, technical_terms)
+
                 text_element = self._create_content_element(
                     element_id=text_id,
                     content=item.text,
@@ -494,13 +510,12 @@ class DocumentProcessor:
                         content_type=ContentType.TEXT,
                         hierarchy_level=level,
                         technical_terms=technical_terms,
-                        section_headers=list(current_section_path)
+                        section_headers=list(current_section_path),
+                        chunk_level=chunk_level,
+                        embedding_type=embedding_type,
+                        parent_element_id=page_map.get(page_number)
                     )
                 )
-
-                # Parent the text to its page
-                if page_number in page_map:
-                    text_element.metadata.parent_element = page_map[page_number]
 
                 elements.append(text_element)
 
@@ -525,6 +540,117 @@ class DocumentProcessor:
         logger.info(f"Extracted {len(elements)} content elements with hierarchical context")
         return elements
 
+    def _determine_chunk_level(self, text: str, hierarchy_level: int, section_path: List[str]) -> ChunkLevel:
+        """
+        Determine the appropriate chunk level for content.
+
+        Args:
+            text: The text content
+            hierarchy_level: The hierarchy level of the text
+            section_path: The section path of the text
+
+        Returns:
+            Appropriate chunk level
+        """
+        # Look for procedure indicators
+        procedure_indicators = [
+            r"(?i)step\s+\d+",
+            r"(?i)procedure\s+\d+",
+            r"(?i)^\d+\.\s+",
+            r"(?i)^\w+\)\s+",
+            r"(?i)instructions",
+            r"(?i)followed by",
+            r"(?i)first.*then.*finally",
+            r"(?i)warning|caution|important",
+            r"(?i)prerequisites"
+        ]
+
+        # Calculate token count for length-based decisions
+        token_count = len(self.tokenizer.encode(text))
+
+        # Check for procedure indicators
+        if any(re.search(pattern, text) for pattern in procedure_indicators):
+            # Check if it's a step or a full procedure
+            if token_count < 300 or re.search(r"(?i)^\d+\.\s+", text):
+                return ChunkLevel.STEP
+            else:
+                return ChunkLevel.PROCEDURE
+
+        # Headers and short sections
+        if hierarchy_level <= 2 or token_count > 1000:
+            return ChunkLevel.SECTION
+
+        # Default to document level for longer content
+        if token_count > 2000:
+            return ChunkLevel.DOCUMENT
+
+        # Default to section level
+        return ChunkLevel.SECTION
+
+    def _determine_embedding_type(self, text: str, technical_terms: List[str]) -> EmbeddingType:
+        """
+        Determine the appropriate embedding type for content.
+
+        Args:
+            text: The text content
+            technical_terms: Extracted technical terms
+
+        Returns:
+            Appropriate embedding type
+        """
+        # Check for technical content with lots of parameters
+        technical_indicators = [
+            r"(?i)parameter",
+            r"(?i)configuration",
+            r"(?i)setting",
+            r"(?i)value",
+            r"(?i)specification",
+            r"(?i)measurement",
+            r"(?i)dimension",
+            r"(?i)technical data"
+        ]
+
+        # Check for task/procedure content
+        task_indicators = [
+            r"(?i)step\s+\d+",
+            r"(?i)procedure",
+            r"(?i)instruction",
+            r"(?i)how to",
+            r"(?i)process",
+            r"(?i)task",
+            r"(?i)operation"
+        ]
+
+        # Check for conceptual content
+        conceptual_indicators = [
+            r"(?i)concept",
+            r"(?i)overview",
+            r"(?i)introduction",
+            r"(?i)description",
+            r"(?i)theory",
+            r"(?i)principle"
+        ]
+
+        # Count matches for each type
+        technical_count = sum(1 for pattern in technical_indicators if re.search(pattern, text))
+        task_count = sum(1 for pattern in task_indicators if re.search(pattern, text))
+        conceptual_count = sum(1 for pattern in conceptual_indicators if re.search(pattern, text))
+
+        # Weight by term count as well
+        if len(technical_terms) > 5:
+            technical_count += 1
+
+        # Select type based on highest count
+        if technical_count > task_count and technical_count > conceptual_count:
+            return EmbeddingType.TECHNICAL
+        elif task_count > technical_count and task_count > conceptual_count:
+            return EmbeddingType.TASK
+        elif conceptual_count > technical_count and conceptual_count > task_count:
+            return EmbeddingType.CONCEPTUAL
+
+        # Default to general if no clear indicator
+        return EmbeddingType.GENERAL
+
     def _track_domain_terms(self, text: str) -> None:
         """
         Track occurrences of domain-specific terms to help categorize the document.
@@ -533,6 +659,9 @@ class DocumentProcessor:
             text: Text to analyze for domain terms
         """
         text_lower = text.lower()
+
+        # Import domain-specific terms dictionary
+        from app.chat.utils.extraction import DOMAIN_SPECIFIC_TERMS
 
         # Check each category of domain terms
         for category, terms in DOMAIN_SPECIFIC_TERMS.items():
@@ -543,182 +672,6 @@ class DocumentProcessor:
                     self.domain_term_counters[f"term:{term}"] += 1
                     break  # Only count one match per category per text segment
 
-    def _create_metadata(
-        self,
-        item: Any,
-        doc: DoclingDocument,
-        content_type: ContentType,
-        section_headers: List[str] = None,
-        hierarchy_level: int = 0
-    ) -> ContentMetadata:
-        """Create uniform metadata for document elements."""
-        page_number = 0
-        if hasattr(item, "prov") and item.prov:
-            if hasattr(item.prov[0], "page_no"):
-                page_number = item.prov[0].page_no
-
-        technical_terms = []
-        if self.config.extract_technical_terms and hasattr(item, "text"):
-            technical_terms = extract_technical_terms(item.text)
-
-        metadata = ContentMetadata(
-            pdf_id=self.pdf_id,
-            page_number=page_number,
-            content_type=content_type,
-            hierarchy_level=hierarchy_level,
-            technical_terms=technical_terms,
-            section_headers=section_headers or [],
-            docling_ref=getattr(item, "self_ref", None),
-            confidence=1.0
-        )
-
-        return metadata
-
-    def _extract_all_technical_terms(self, elements: List[ContentElement]) -> List[str]:
-        """
-        Extract all technical terms from document elements with deduplication.
-
-        Args:
-            elements: List of content elements
-
-        Returns:
-            List of unique technical terms
-        """
-        all_terms = set()
-
-        for element in elements:
-            if hasattr(element, 'metadata') and hasattr(element.metadata, 'technical_terms'):
-                all_terms.update(element.metadata.technical_terms)
-
-        return list(all_terms)
-
-    async def _update_pdf_metadata(self, document_summary: Dict[str, Any], predicted_category: str) -> None:
-        """
-        Update PDF metadata in the database with document summary and category.
-        Also sets a meaningful description for the PDF.
-
-        Args:
-            document_summary: Document summary with title, concepts, insights, etc.
-            predicted_category: Predicted document category
-        """
-        try:
-            from app.web.db.models import Pdf
-            from app.web.db import db
-            import logging
-
-            logger = logging.getLogger(__name__)
-
-            # Fetch the PDF record
-            pdf = db.session.execute(
-                db.select(Pdf).filter_by(id=self.pdf_id)
-            ).scalar_one()
-
-            # Prepare metadata to add
-            new_metadata = {
-                'document_summary': document_summary,
-                'predicted_category': predicted_category,
-                'domain_term_counts': dict(self.domain_term_counters),
-                'processing_date': datetime.utcnow().isoformat()
-            }
-
-            # Update metadata using our method
-            pdf.update_metadata(new_metadata)
-
-            # Set category if it's still "general" or not set
-            if not pdf.category or pdf.category == 'general':
-                pdf.category = predicted_category
-
-            # IMPORTANT: Create a meaningful description from the summary
-            description = ""
-
-            # First try using the explicit description field if available
-            if document_summary.get('description'):
-                description = document_summary['description']
-            # Next, try to find a descriptive insight to use
-            elif document_summary.get('key_insights'):
-                # Sort insights by length (descending) to find the most detailed one
-                sorted_insights = sorted(document_summary['key_insights'], key=len, reverse=True)
-                if sorted_insights:
-                    description = sorted_insights[0]
-            # Otherwise, build from title and concepts
-            elif document_summary.get('title'):
-                title = document_summary['title']
-                # Skip generic titles
-                if title != "Technical Document":
-                    description = title
-
-                # Add primary concepts if available
-                if document_summary.get('primary_concepts'):
-                    concepts = document_summary['primary_concepts'][:5]
-                    if concepts:
-                        if description:
-                            description += ". "
-                        description += f"Key concepts: {', '.join(concepts)}"
-
-            # If still no description, create one from category
-            if not description and predicted_category:
-                description = f"Technical documentation related to {predicted_category.capitalize()}. "
-
-                # Add primary concepts if available
-                if document_summary.get('primary_concepts'):
-                    concepts = document_summary['primary_concepts'][:5]
-                    if concepts:
-                        description += f"Key concepts: {', '.join(concepts)}"
-
-            # Set a default if still empty
-            if not description:
-                description = f"Technical document with {len(document_summary.get('section_structure', []))} sections"
-
-            # Trim if too long (database constraint might be 500-1000 chars)
-            max_length = 500
-            if len(description) > max_length:
-                description = description[:max_length-3] + "..."
-
-            # Update the description
-            pdf.description = description
-            logger.info(f"Updated PDF description: {description[:50]}...")
-
-            # Mark as processed
-            pdf.processed = True
-            pdf.error = None
-            pdf.processed_at = datetime.utcnow()
-
-            # Commit changes
-            db.session.commit()
-
-            logger.info(f"Updated PDF metadata with summary, category: {predicted_category}, and description")
-        except Exception as e:
-            logger.error(f"Failed to update PDF metadata: {str(e)}")
-            raise
-
-    async def _update_pdf_error(self, error_message: str) -> None:
-        """
-        Update PDF record with error status.
-
-        Args:
-            error_message: Error message to store
-        """
-        try:
-            from app.web.db.models import Pdf
-            from app.web.db import db
-
-            # Fetch the PDF record
-            pdf = db.session.execute(
-                db.select(Pdf).filter_by(id=self.pdf_id)
-            ).scalar_one()
-
-            # Update error information
-            pdf.processed = False
-            pdf.error = error_message
-            pdf.processed_at = datetime.utcnow()
-
-            # Commit changes
-            db.session.commit()
-            logger.info(f"Updated PDF with error status: {self.pdf_id}")
-        except Exception as e:
-            logger.error(f"Failed to update PDF error status: {str(e)}")
-            raise
-
     def _create_content_element(
         self,
         element_id: str,
@@ -728,8 +681,19 @@ class DocumentProcessor:
     ) -> ContentElement:
         """Create a content element with specified properties."""
         # Ensure metadata has pdf_id set
-        if not hasattr(metadata, 'pdf_id') or not metadata.pdf_id:
+        if not metadata.pdf_id:
             metadata.pdf_id = self.pdf_id
+
+        # Ensure element_id is in metadata for lookups
+        metadata.element_id = element_id
+
+        # Count tokens for reporting
+        token_count = len(self.tokenizer.encode(content))
+
+        # Add to metrics
+        if not hasattr(self.metrics, "token_counts"):
+            self.metrics["token_counts"] = defaultdict(int)
+        self.metrics["token_counts"][str(content_type)] += token_count
 
         return ContentElement(
             element_id=element_id,
@@ -820,16 +784,24 @@ class DocumentProcessor:
                     text_parts.extend(str(cell) for cell in rows[0] if cell)
                 technical_terms = extract_technical_terms(" ".join(text_parts))
 
-            table_data = TableData(
-                headers=headers,
-                rows=rows[:10],
-                caption=caption,
-                markdown=markdown,
-                summary=summary,
-                row_count=row_count,
-                column_count=col_count,
-                technical_concepts=technical_terms
-            )
+            # Create table data object
+            table_data = {
+                "headers": headers,
+                "rows": rows[:10],  # Only store the first 10 rows to avoid excessive metadata
+                "caption": caption,
+                "markdown": markdown,
+                "summary": summary,
+                "row_count": row_count,
+                "column_count": col_count,
+                "technical_concepts": technical_terms
+            }
+
+            # Determine embedding type for tables
+            embedding_type = EmbeddingType.TECHNICAL
+            if any(term.lower() in caption.lower() for term in ["procedure", "process", "step", "task"]):
+                embedding_type = EmbeddingType.TASK
+
+            element_id = f"tbl_{self.pdf_id}_{uuid.uuid4().hex[:8]}"
 
             metadata = ContentMetadata(
                 pdf_id=self.pdf_id,
@@ -839,10 +811,12 @@ class DocumentProcessor:
                 table_data=table_data,
                 section_headers=section_headers or [],
                 hierarchy_level=hierarchy_level,
+                element_id=element_id,
+                chunk_level=ChunkLevel.SECTION,  # Tables are typically section-level
+                embedding_type=embedding_type,
                 docling_ref=getattr(item, "self_ref", None)
             )
 
-            element_id = f"tbl_{self.pdf_id}_{uuid.uuid4().hex[:8]}"
             return ContentElement(
                 element_id=element_id,
                 content=markdown,
@@ -902,45 +876,52 @@ class DocumentProcessor:
             if item.prov and hasattr(item.prov[0], "page_no"):
                 page_number = item.prov[0].page_no
 
-            # Surrounding context
-            surrounding_context = self._extract_surrounding_context(item, doc)
+            # Extract context
+            context = self._extract_surrounding_context(item, doc)
 
-            # Markdown
+            # Generate markdown content
             rel_path = str(image_path.relative_to(self.output_dir)) if str(image_path).startswith(str(self.output_dir)) else str(image_path)
             md_content = f"![{caption}]({rel_path})"
 
-            image_features = ImageFeatures(
-                dimensions=(pil_image.width, pil_image.height),
-                aspect_ratio=pil_image.width / pil_image.height if pil_image.height > 0 else 1.0,
-                color_mode=pil_image.mode,
-                is_grayscale=pil_image.mode in ("L", "LA")
-            )
+            # Extract technical terms from caption and context
+            technical_terms = extract_technical_terms(caption + " " + (context or ""))
 
+            # Create image features
+            image_features = {
+                "dimensions": (pil_image.width, pil_image.height),
+                "aspect_ratio": pil_image.width / pil_image.height if pil_image.height > 0 else 1.0,
+                "color_mode": pil_image.mode,
+                "is_grayscale": pil_image.mode in ("L", "LA")
+            }
+
+            # Detect objects in image
             detected_objects = self._detect_objects_in_image(pil_image, caption)
 
-            # Enhanced technical term extraction from image caption and context
-            technical_terms = extract_technical_terms(caption + " " + (surrounding_context or ""))
+            # Create image analysis
+            image_analysis = {
+                "description": caption,
+                "detected_objects": detected_objects,
+                "technical_details": {"width": pil_image.width, "height": pil_image.height},
+                "technical_concepts": technical_terms
+            }
 
-            image_analysis = ImageAnalysis(
-                description=caption,
-                detected_objects=detected_objects,
-                technical_details={"width": pil_image.width, "height": pil_image.height},
-                technical_concepts=technical_terms
-            )
+            # Create image paths
+            image_paths = {
+                "original": str(image_path),
+                "format": "PNG",
+                "size": os.path.getsize(image_path) if os.path.exists(image_path) else 0
+            }
 
-            image_paths = ImagePaths(
-                original=str(image_path),
-                format="PNG",
-                size=os.path.getsize(image_path) if os.path.exists(image_path) else 0
-            )
+            # Create complete image metadata
+            image_metadata = {
+                "image_id": image_id,
+                "paths": image_paths,
+                "features": image_features,
+                "analysis": image_analysis,
+                "page_number": page_number
+            }
 
-            image_metadata = ImageMetadata(
-                image_id=image_id,
-                paths=image_paths,
-                features=image_features,
-                analysis=image_analysis,
-                page_number=page_number
-            )
+            element_id = image_id
 
             metadata = ContentMetadata(
                 pdf_id=self.pdf_id,
@@ -950,13 +931,16 @@ class DocumentProcessor:
                 image_metadata=image_metadata,
                 section_headers=section_headers or [],
                 hierarchy_level=hierarchy_level,
-                surrounding_context=surrounding_context,
+                element_id=element_id,
+                chunk_level=ChunkLevel.SECTION,  # Images are typically section-level
+                embedding_type=EmbeddingType.CONCEPTUAL,  # Use conceptual embedding for images
+                context=context,
                 image_path=str(image_path),
                 docling_ref=getattr(item, "self_ref", None)
             )
 
             return ContentElement(
-                element_id=image_id,
+                element_id=element_id,
                 content=md_content,
                 content_type=ContentType.IMAGE,
                 pdf_id=self.pdf_id,
@@ -1042,122 +1026,479 @@ class DocumentProcessor:
 
         return objects
 
-    def _generate_chunks(self, docling_doc: DoclingDocument) -> List[Dict[str, Any]]:
+    async def _extract_procedures_and_parameters(
+        self,
+        elements: List[ContentElement],
+        md_content: str
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
-        Generate optimized chunks using Docling's HybridChunker.
-        Ensures chunks retain document structure and context.
+        Extract procedures and parameters from the document content.
+
+        Args:
+            elements: List of content elements
+            md_content: Markdown content
+
+        Returns:
+            Tuple of (procedures, parameters)
+        """
+        try:
+            from app.chat.utils.extraction import extract_procedures_and_parameters
+
+            # Extract procedures and parameters
+            procedures, parameters = extract_procedures_and_parameters(md_content)
+
+            # Add section context to procedures
+            for proc in procedures:
+                # Find section context
+                section_headers = []
+                for element in elements:
+                    if element.metadata.page_number == proc.get("page", 0):
+                        if element.metadata.section_headers:
+                            section_headers = element.metadata.section_headers
+                            break
+
+                proc["section_headers"] = section_headers
+                proc["pdf_id"] = self.pdf_id
+
+                # Create a unique ID for the procedure
+                proc["procedure_id"] = f"proc_{self.pdf_id}_{uuid.uuid4().hex[:8]}"
+
+                # Create a procedure element
+                if proc.get("content"):
+                    proc_element = self._create_content_element(
+                        element_id=proc["procedure_id"],
+                        content=proc["content"],
+                        content_type=ContentType.PROCEDURE,
+                        metadata=ContentMetadata(
+                            pdf_id=self.pdf_id,
+                            page_number=proc.get("page", 0),
+                            content_type=ContentType.PROCEDURE,
+                            section_headers=section_headers,
+                            hierarchy_level=2,  # Procedures are usually second level
+                            technical_terms=proc.get("parameters", []),
+                            procedure_metadata=proc,
+                            chunk_level=ChunkLevel.PROCEDURE,
+                            embedding_type=EmbeddingType.TASK
+                        )
+                    )
+                    elements.append(proc_element)
+
+            # Add section context to parameters
+            for param in parameters:
+                # Find section context
+                section_headers = []
+                for element in elements:
+                    if element.metadata.page_number == param.get("page", 0):
+                        if element.metadata.section_headers:
+                            section_headers = element.metadata.section_headers
+                            break
+
+                param["section_headers"] = section_headers
+                param["pdf_id"] = self.pdf_id
+
+                # Create a unique ID for the parameter
+                param["parameter_id"] = f"param_{self.pdf_id}_{uuid.uuid4().hex[:8]}"
+
+                # Create a parameter element
+                if param.get("name") and param.get("description"):
+                    content = f"{param['name']}: {param['description']}"
+                    param_element = self._create_content_element(
+                        element_id=param["parameter_id"],
+                        content=content,
+                        content_type=ContentType.PARAMETER,
+                        metadata=ContentMetadata(
+                            pdf_id=self.pdf_id,
+                            page_number=param.get("page", 0),
+                            content_type=ContentType.PARAMETER,
+                            section_headers=section_headers,
+                            hierarchy_level=3,  # Parameters are usually third level
+                            technical_terms=[param["name"]],
+                            parameter_metadata=param,
+                            chunk_level=ChunkLevel.STEP,
+                            embedding_type=EmbeddingType.TECHNICAL
+                        )
+                    )
+                    elements.append(param_element)
+
+            return procedures, parameters
+
+        except Exception as e:
+            logger.error(f"Error extracting procedures and parameters: {str(e)}")
+            return [], []
+
+    async def _generate_multi_level_chunks(
+        self,
+        elements: List[ContentElement],
+        md_content: str
+    ) -> List[DocumentChunk]:
+        """
+        Generate multi-level chunks from document content.
+        Implements the hierarchical chunking strategy.
+
+        Args:
+            elements: List of content elements
+            md_content: Markdown content
+
+        Returns:
+            List of document chunks at different levels
         """
         chunking_start = time.time()
+        chunks = []
+
         try:
-            tokenizer = get_tokenizer(self.config.embedding_model)
-            chunker = HybridChunker(
-                tokenizer=tokenizer,
-                max_tokens=self.config.chunk_size,
-                overlap=self.config.chunk_overlap,
-                merge_peers=self.config.merge_list_items,
-                merge_list_items=self.config.merge_list_items
+            # Group elements by section and page
+            section_elements = defaultdict(list)
+            page_elements = defaultdict(list)
+
+            # Map element IDs to elements for easier lookup
+            element_map = {e.element_id: e for e in elements}
+
+            # Group by section and page
+            for element in elements:
+                # Skip page elements
+                if element.content_type == ContentType.PAGE:
+                    continue
+
+                # Group by section
+                section_key = " > ".join(element.metadata.section_headers) if element.metadata.section_headers else "unknown_section"
+                section_elements[section_key].append(element)
+
+                # Group by page
+                page_elements[element.metadata.page_number].append(element)
+
+            # 1. Create document-level chunks
+            doc_chunk_id = f"doc_{self.pdf_id}_overview"
+            doc_chunk = DocumentChunk(
+                chunk_id=doc_chunk_id,
+                content=self._extract_overview_text(md_content, 3000),
+                metadata=ChunkMetadata(
+                    pdf_id=self.pdf_id,
+                    content_type="text",
+                    chunk_level=ChunkLevel.DOCUMENT,
+                    chunk_index=0,
+                    page_numbers=[],
+                    section_headers=[],
+                    embedding_type=EmbeddingType.CONCEPTUAL,
+                    element_ids=[],
+                    token_count=len(self.tokenizer.encode(self._extract_overview_text(md_content, 3000)))
+                )
             )
-            chunks = []
-            raw_chunks = list(chunker.chunk(dl_doc=docling_doc))
+            chunks.append(doc_chunk)
 
-            for i, chunk in enumerate(raw_chunks):
-                page_numbers = self._extract_page_numbers(chunk)
-                headings = self._extract_headings(chunk)
-                text = chunker.serialize(chunk=chunk)
+            # 2. Create section-level chunks
+            section_index = 0
+            for section_key, section_elems in section_elements.items():
+                # Skip empty sections
+                if not section_elems:
+                    continue
 
-                technical_terms = extract_technical_terms(text)
+                # Extract pages covered by this section
+                pages = sorted(list(set(e.metadata.page_number for e in section_elems if e.metadata.page_number)))
 
-                # Determine section context for this chunk
-                chunk_section_headers = []
-                if headings:
-                    chunk_section_headers = self._determine_section_context(headings)
+                # Extract section content
+                section_content = "\n\n".join(e.content for e in section_elems)
 
-                metadata = {
-                    "chunk_id": f"{self.pdf_id}-chunk-{i}",
-                    "pdf_id": self.pdf_id,
-                    "chunk_index": i,
-                    "page_numbers": page_numbers,
-                    "headings": headings,
-                    "section_headers": chunk_section_headers,  # Include section context
-                    "technical_terms": technical_terms,
-                    "position": i / max(1, len(raw_chunks) - 1),  # normalized
-                    "source_type": "docling_chunk",
-                    "content_types": self._detect_content_types(text)
-                }
+                # Extract technical terms
+                tech_terms = set()
+                for elem in section_elems:
+                    if hasattr(elem.metadata, 'technical_terms') and elem.metadata.technical_terms:
+                        tech_terms.update(elem.metadata.technical_terms)
 
-                chunks.append({
-                    "chunk_id": metadata["chunk_id"],
-                    "content": text,
-                    "metadata": metadata
-                })
+                # Create section chunk
+                section_chunk_id = f"sec_{self.pdf_id}_{section_index}"
+                section_chunk = DocumentChunk(
+                    chunk_id=section_chunk_id,
+                    content=section_content,
+                    metadata=ChunkMetadata(
+                        pdf_id=self.pdf_id,
+                        content_type="text",
+                        chunk_level=ChunkLevel.SECTION,
+                        chunk_index=section_index,
+                        page_numbers=pages,
+                        section_headers=section_key.split(" > ") if section_key != "unknown_section" else [],
+                        parent_chunk_id=doc_chunk_id,
+                        technical_terms=list(tech_terms),
+                        embedding_type=EmbeddingType.CONCEPTUAL,
+                        element_ids=[e.element_id for e in section_elems],
+                        token_count=len(self.tokenizer.encode(section_content))
+                    )
+                )
+                chunks.append(section_chunk)
+                section_index += 1
 
+            # 3. Create procedure-level chunks
+            procedure_elements = [e for e in elements if e.content_type == ContentType.PROCEDURE]
+
+            for p_index, proc_elem in enumerate(procedure_elements):
+                # Find parent section
+                parent_section_key = " > ".join(proc_elem.metadata.section_headers) if proc_elem.metadata.section_headers else "unknown_section"
+                parent_section_chunk = next((chunk for chunk in chunks if
+                                          chunk.metadata.chunk_level == ChunkLevel.SECTION and
+                                          " > ".join(chunk.metadata.section_headers) == parent_section_key), None)
+
+                parent_chunk_id = parent_section_chunk.chunk_id if parent_section_chunk else doc_chunk_id
+
+                # Create procedure chunk
+                proc_chunk_id = f"proc_{self.pdf_id}_{p_index}"
+                proc_chunk = DocumentChunk(
+                    chunk_id=proc_chunk_id,
+                    content=proc_elem.content,
+                    metadata=ChunkMetadata(
+                        pdf_id=self.pdf_id,
+                        content_type="procedure",
+                        chunk_level=ChunkLevel.PROCEDURE,
+                        chunk_index=p_index,
+                        page_numbers=[proc_elem.metadata.page_number] if proc_elem.metadata.page_number else [],
+                        section_headers=proc_elem.metadata.section_headers,
+                        parent_chunk_id=parent_chunk_id,
+                        technical_terms=proc_elem.metadata.technical_terms,
+                        embedding_type=EmbeddingType.TASK,
+                        element_ids=[proc_elem.element_id],
+                        token_count=len(self.tokenizer.encode(proc_elem.content))
+                    )
+                )
+                chunks.append(proc_chunk)
+
+            # 4. Create parameter-level (step-level) chunks
+            parameter_elements = [e for e in elements if e.content_type == ContentType.PARAMETER]
+
+            for param_index, param_elem in enumerate(parameter_elements):
+                # Find parent procedure if applicable
+                if param_elem.metadata.parameter_metadata and "procedure_id" in param_elem.metadata.parameter_metadata:
+                    proc_id = param_elem.metadata.parameter_metadata["procedure_id"]
+                    parent_proc_chunk = next((chunk for chunk in chunks if
+                                           chunk.metadata.chunk_level == ChunkLevel.PROCEDURE and
+                                           proc_id in chunk.metadata.element_ids), None)
+
+                    parent_chunk_id = parent_proc_chunk.chunk_id if parent_proc_chunk else doc_chunk_id
+                else:
+                    # Find parent section
+                    parent_section_key = " > ".join(param_elem.metadata.section_headers) if param_elem.metadata.section_headers else "unknown_section"
+                    parent_section_chunk = next((chunk for chunk in chunks if
+                                              chunk.metadata.chunk_level == ChunkLevel.SECTION and
+                                              " > ".join(chunk.metadata.section_headers) == parent_section_key), None)
+
+                    parent_chunk_id = parent_section_chunk.chunk_id if parent_section_chunk else doc_chunk_id
+
+                # Create parameter chunk
+                param_chunk_id = f"param_{self.pdf_id}_{param_index}"
+                param_chunk = DocumentChunk(
+                    chunk_id=param_chunk_id,
+                    content=param_elem.content,
+                    metadata=ChunkMetadata(
+                        pdf_id=self.pdf_id,
+                        content_type="parameter",
+                        chunk_level=ChunkLevel.STEP,
+                        chunk_index=param_index,
+                        page_numbers=[param_elem.metadata.page_number] if param_elem.metadata.page_number else [],
+                        section_headers=param_elem.metadata.section_headers,
+                        parent_chunk_id=parent_chunk_id,
+                        technical_terms=param_elem.metadata.technical_terms,
+                        embedding_type=EmbeddingType.TECHNICAL,
+                        element_ids=[param_elem.element_id],
+                        token_count=len(self.tokenizer.encode(param_elem.content))
+                    )
+                )
+                chunks.append(param_chunk)
+
+            # Record metrics
             self.metrics["timings"]["chunking"] = time.time() - chunking_start
             self.metrics["counts"]["chunks"] = len(chunks)
+            self.metrics["counts"]["document_chunks"] = sum(1 for c in chunks if c.metadata.chunk_level == ChunkLevel.DOCUMENT)
+            self.metrics["counts"]["section_chunks"] = sum(1 for c in chunks if c.metadata.chunk_level == ChunkLevel.SECTION)
+            self.metrics["counts"]["procedure_chunks"] = sum(1 for c in chunks if c.metadata.chunk_level == ChunkLevel.PROCEDURE)
+            self.metrics["counts"]["step_chunks"] = sum(1 for c in chunks if c.metadata.chunk_level == ChunkLevel.STEP)
 
-            logger.info(f"Generated {len(chunks)} optimized chunks with HybridChunker")
+            logger.info(f"Generated {len(chunks)} chunks using multi-level chunking strategy")
             return chunks
 
         except Exception as e:
-            logger.error(f"Chunk generation failed: {e}", exc_info=True)
+            logger.error(f"Error generating multi-level chunks: {str(e)}", exc_info=True)
             return []
 
-    def _determine_section_context(self, headings: List[str]) -> List[str]:
-        """Determine section context based on headings in a chunk."""
-        if not headings:
-            return []
-
-        # Use our tracked section hierarchy to build proper context
-        # Find the deepest heading that matches our known sections
-        for heading in headings:
-            if heading in self.section_map:
-                level = self.section_map[heading]
-
-                # Find the section path for this heading
-                result = []
-                for section_path in self.element_section_map.values():
-                    if heading in section_path:
-                        # Found the section path, return it
-                        return section_path
-
-        # If no match found, just return the headings
-        return headings
-
-    def _extract_page_numbers(self, chunk: BaseChunk) -> List[int]:
-        """Extract page numbers from a chunk."""
-        try:
-            page_numbers = set()
-            if hasattr(chunk, "meta") and hasattr(chunk.meta, "doc_items"):
-                for item in chunk.meta.doc_items:
-                    if hasattr(item, "prov") and item.prov:
-                        for prov in item.prov:
-                            if hasattr(prov, "page_no"):
-                                page_numbers.add(prov.page_no)
-            return sorted(list(page_numbers)) if page_numbers else [0]
-        except Exception as e:
-            logger.warning(f"Failed to extract page numbers: {e}")
-            return [0]
-
-    def _extract_headings(self, chunk: BaseChunk) -> List[str]:
-        """Extract headings from a chunk with improved detection."""
-        try:
-            headings = []
-            if hasattr(chunk, "meta") and hasattr(chunk.meta, "doc_items"):
-                for item in chunk.meta.doc_items:
-                    if isinstance(item, SectionHeaderItem) or getattr(item, "label", None) == DocItemLabel.SECTION_HEADER:
-                        if hasattr(item, "text") and item.text:
-                            headings.append(item.text.strip())
-            return headings
-        except Exception as e:
-            logger.warning(f"Failed to extract headings: {e}")
-            return []
-
-    def _detect_content_types(self, text: str) -> List[str]:
+    def _extract_overview_text(self, md_content: str, max_tokens: int = 3000) -> str:
         """
-        Detect content types present in text with enhanced patterns.
-        Especially focused on domain-specific content like trend data visualizations.
+        Extract overview text from markdown content.
+        Gets the beginning of the document for a document-level overview.
+
+        Args:
+            md_content: Markdown content
+            max_tokens: Maximum tokens to extract
+
+        Returns:
+            Overview text
         """
-        from app.chat.utils.processing import detect_content_types
-        return detect_content_types(text)
+        # Get encoded tokens
+        encoded = self.tokenizer.encode(md_content)
+
+        # Truncate if needed
+        if len(encoded) > max_tokens:
+            encoded = encoded[:max_tokens]
+
+        # Decode back to text
+        return self.tokenizer.decode(encoded)
+
+    def _extract_all_technical_terms(self, elements: List[ContentElement]) -> List[str]:
+        """
+        Extract all technical terms from document elements with deduplication.
+
+        Args:
+            elements: List of content elements
+
+        Returns:
+            List of unique technical terms
+        """
+        all_terms = set()
+
+        for element in elements:
+            if hasattr(element, 'metadata') and hasattr(element.metadata, 'technical_terms'):
+                all_terms.update(element.metadata.technical_terms)
+
+        return list(all_terms)
+
+    async def _build_concept_network(self, elements: List[ContentElement], chunks: List[DocumentChunk]) -> None:
+        """
+        Build concept network from document content using optimized extraction methods.
+        Enhanced to focus on key technical concepts and domain-specific relationships.
+        """
+        try:
+            # 1. Set enhanced configuration for concept extraction
+            MIN_CONCEPT_OCCURRENCES = 1  # Capture ALL technical terms, even rare ones
+            MIN_RELATIONSHIP_CONFIDENCE = 0.5  # LOWERED from 0.6 to catch more relationships
+            MAX_CONCEPTS = self.config.max_concepts_per_document
+
+            # 2. Extract concepts with improved domain awareness
+            concepts_info = defaultdict(lambda: {
+                "count": 0,
+                "in_headers": False,
+                "sections": set(),
+                "pages": set(),
+                "domain_category": None  # Track domain category for each concept
+            })
+
+            # Process elements with deep extraction of all technical terms
+            for element in elements:
+                if element.metadata.technical_terms:
+                    for term in element.metadata.technical_terms:
+                        # Include ALL terms - even short ones might be important in technical docs
+                        concepts_info[term]["count"] += 1
+
+                        # Track header, section, and page information
+                        if element.metadata.hierarchy_level <= 2:
+                            concepts_info[term]["in_headers"] = True
+                        if element.metadata.section_headers:
+                            concepts_info[term]["sections"].update(element.metadata.section_headers)
+                        if element.metadata.page_number:
+                            concepts_info[term]["pages"].add(element.metadata.page_number)
+
+                        # Check if this is a domain-specific term
+                        from app.chat.utils.extraction import DOMAIN_SPECIFIC_TERMS
+                        for category, domain_terms in DOMAIN_SPECIFIC_TERMS.items():
+                            term_lower = term.lower()
+                            if any(dt.lower() in term_lower or term_lower in dt.lower() for dt in domain_terms):
+                                concepts_info[term]["domain_category"] = category
+                                break
+
+            # 3. Score concepts for importance with enhanced logic
+            concept_scores = {}
+            for term, info in concepts_info.items():
+                # Base score from occurrences with logarithmic scaling to avoid over-penalizing rare terms
+                occurrences = info["count"]
+                base_score = 0.5 + min(0.5, math.log(occurrences + 1) / 5.0)
+
+                # Bonus for appearing in headers (critical for technical docs)
+                header_bonus = 0.3 if info["in_headers"] else 0
+
+                # Bonus for appearing in multiple sections
+                section_bonus = min(0.3, len(info["sections"]) * 0.1)
+
+                # Bonus for multi-word terms (likely more specific)
+                specificity_bonus = 0.1 if " " in term else 0
+
+                # Domain-specific bonus - prioritize terms from our known domain
+                domain_bonus = 0.3 if info["domain_category"] else 0
+
+                # Page coverage bonus - terms that appear across many pages are important
+                page_bonus = min(0.2, len(info["pages"]) * 0.02)
+
+                # Combined score
+                concept_scores[term] = base_score + header_bonus + section_bonus + specificity_bonus + domain_bonus + page_bonus
+
+            # 4. Select top concepts by importance score
+            top_concepts = sorted(
+                concept_scores.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:MAX_CONCEPTS]
+
+            # 5. Create concept objects for only the top concepts
+            concept_objects = []
+            top_concept_terms = set(term for term, _ in top_concepts)
+
+            for term, score in top_concepts:
+                info = concepts_info[term]
+                concept = Concept(
+                    name=term,
+                    occurrences=info["count"],
+                    in_headers=info["in_headers"],
+                    sections=list(info["sections"]),
+                    first_occurrence_page=min(info["pages"]) if info["pages"] else None,
+                    importance_score=score,
+                    is_primary=score > 0.8,  # Top concepts are primary
+                    category=info["domain_category"],  # Include domain category
+                    pdf_id=self.pdf_id
+                )
+                concept_objects.append(concept)
+                self.concept_network.add_concept(concept)
+
+            # 6. Extract all text content for relationship analysis
+            full_text = ""
+            for element in elements:
+                if element.content_type == ContentType.TEXT and element.content:
+                    full_text += element.content + "\n\n"
+
+            # 7. Use the extract_document_relationships function with domain awareness
+            relationships = extract_document_relationships(
+                text=full_text,
+                technical_terms=list(top_concept_terms),
+                min_confidence=MIN_RELATIONSHIP_CONFIDENCE  # Using lower threshold
+            )
+
+            # Log the number of relationships found with the lower threshold
+            if relationships:
+                logger.info(f"Found {len(relationships)} relationships with confidence threshold {MIN_RELATIONSHIP_CONFIDENCE}")
+            else:
+                logger.info(f"No relationships found even with lower confidence threshold {MIN_RELATIONSHIP_CONFIDENCE}")
+
+            # 8. Add extracted relationships to the concept network
+            for rel in relationships:
+                relationship = ConceptRelationship(
+                    source=rel["source"],
+                    target=rel["target"],
+                    type=RelationType.map_type(rel["relationship_type"]),  # Convert to enum
+                    weight=rel.get("confidence", 0.75),
+                    context=rel.get("context", ""),
+                    extraction_method=rel.get("extraction_method", "document-based"),
+                    pdf_id=self.pdf_id
+                )
+                self.concept_network.add_relationship(relationship)
+
+            # 9. Calculate importance scores and identify primary concepts
+            self.concept_network.calculate_importance_scores()
+
+            # 10. Register with research manager for reuse
+            if self.research_manager:
+                self._handle_research_manager_integration(self.concept_network)
+
+            logger.info(
+                f"Built optimized concept network with {len(concept_objects)} concepts "
+                f"and {len(relationships)} relationships"
+            )
+
+        except Exception as e:
+            logger.error(f"Concept network building failed: {e}", exc_info=True)
+            # Don't fail completely, create an empty network
+            self.concept_network = ConceptNetwork(pdf_id=self.pdf_id)
 
     def _predict_document_category(self, technical_terms: List[str], content: str) -> str:
         """
@@ -1330,149 +1671,238 @@ class DocumentProcessor:
 
         return "general"  # Default category if no strong matches
 
-    async def _build_concept_network(self, elements: List[ContentElement], chunks: List[Dict[str, Any]]) -> None:
+    async def _ingest_to_unified_store(
+        self,
+        elements: List[ContentElement],
+        chunks: List[DocumentChunk],
+        document_summary: Dict[str, Any],
+        predicted_category: str
+    ) -> bool:
         """
-        Build concept network from document content using optimized extraction methods.
-        Enhanced to focus on key technical concepts and domain-specific relationships.
+        Ingest processed content into unified store (MongoDB + Qdrant).
+        Replaces the Neo4j ingestion in the original implementation.
+
+        Args:
+            elements: Content elements to store
+            chunks: Document chunks to store
+            document_summary: Document summary information
+            predicted_category: Predicted document category
+
+        Returns:
+            Success status
         """
+        logger.info(f"Ingesting processed content to unified store for {self.pdf_id}")
+
         try:
-            # 1. Set enhanced configuration for concept extraction
-            MIN_CONCEPT_OCCURRENCES = 1  # Capture ALL technical terms, even rare ones
-            MIN_RELATIONSHIP_CONFIDENCE = 0.5  # LOWERED from 0.6 to catch more relationships
-            MAX_CONCEPTS = self.config.max_concepts_per_document
+            # 1. Create document node
+            document_title = document_summary.get('title', f"Document {self.pdf_id}")
 
-            # 2. Extract concepts with improved domain awareness
-            concepts_info = defaultdict(lambda: {
-                "count": 0,
-                "in_headers": False,
-                "sections": set(),
-                "pages": set(),
-                "domain_category": None  # Track domain category for each concept
-            })
+            metadata = {
+                "processed_at": datetime.utcnow().isoformat(),
+                "element_count": len(elements),
+                "domain_category": predicted_category,
+                "document_summary": document_summary
+            }
 
-            # Process elements with deep extraction of all technical terms
-            for element in elements:
-                if element.metadata.technical_terms:
-                    for term in element.metadata.technical_terms:
-                        # Include ALL terms - even short ones might be important in technical docs
-                        concepts_info[term]["count"] += 1
-
-                        # Track header, section, and page information
-                        if element.metadata.hierarchy_level <= 2:
-                            concepts_info[term]["in_headers"] = True
-                        if element.metadata.section_headers:
-                            concepts_info[term]["sections"].update(element.metadata.section_headers)
-                        if element.metadata.page_number:
-                            concepts_info[term]["pages"].add(element.metadata.page_number)
-
-                        # Check if this is a domain-specific term
-                        for category, domain_terms in DOMAIN_SPECIFIC_TERMS.items():
-                            term_lower = term.lower()
-                            if any(dt.lower() in term_lower or term_lower in dt.lower() for dt in domain_terms):
-                                concepts_info[term]["domain_category"] = category
-                                break
-
-            # 3. Score concepts for importance with enhanced logic
-            concept_scores = {}
-            for term, info in concepts_info.items():
-                # Base score from occurrences with logarithmic scaling to avoid over-penalizing rare terms
-                occurrences = info["count"]
-                base_score = 0.5 + min(0.5, math.log(occurrences + 1) / 5.0)
-
-                # Bonus for appearing in headers (critical for technical docs)
-                header_bonus = 0.3 if info["in_headers"] else 0
-
-                # Bonus for appearing in multiple sections
-                section_bonus = min(0.3, len(info["sections"]) * 0.1)
-
-                # Bonus for multi-word terms (likely more specific)
-                specificity_bonus = 0.1 if " " in term else 0
-
-                # Domain-specific bonus - prioritize terms from our known domain
-                domain_bonus = 0.3 if info["domain_category"] else 0
-
-                # Page coverage bonus - terms that appear across many pages are important
-                page_bonus = min(0.2, len(info["pages"]) * 0.02)
-
-                # Combined score
-                concept_scores[term] = base_score + header_bonus + section_bonus + specificity_bonus + domain_bonus + page_bonus
-
-            # 4. Select top concepts by importance score
-            top_concepts = sorted(
-                concept_scores.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )[:MAX_CONCEPTS]
-
-            # 5. Create concept objects for only the top concepts
-            concept_objects = []
-            top_concept_terms = set(term for term, _ in top_concepts)
-
-            for term, score in top_concepts:
-                info = concepts_info[term]
-                concept = Concept(
-                    name=term,
-                    occurrences=info["count"],
-                    in_headers=info["in_headers"],
-                    sections=list(info["sections"]),
-                    first_occurrence_page=min(info["pages"]) if info["pages"] else None,
-                    importance_score=score,
-                    is_primary=score > 0.8,  # Top concepts are primary
-                    category=info["domain_category"]  # Include domain category
-                )
-                concept_objects.append(concept)
-                self.concept_network.add_concept(concept)
-
-            # 6. Extract all text content for relationship analysis
-            full_text = ""
-            for element in elements:
-                if element.content_type == ContentType.TEXT and element.content:
-                    full_text += element.content + "\n\n"
-
-            # 7. Use the extract_document_relationships function with domain awareness
-            relationships = extract_document_relationships(
-                text=full_text,
-                technical_terms=list(top_concept_terms),
-                min_confidence=MIN_RELATIONSHIP_CONFIDENCE  # Using lower threshold
+            await self.vector_store.create_document_node(
+                pdf_id=self.pdf_id,
+                title=document_title,
+                metadata=metadata
             )
 
-            # Log the number of relationships found with the lower threshold
-            if relationships:
-                logger.info(f"Found {len(relationships)} relationships with confidence threshold {MIN_RELATIONSHIP_CONFIDENCE}")
-            else:
-                logger.info(f"No relationships found even with lower confidence threshold {MIN_RELATIONSHIP_CONFIDENCE}")
+            # 2. Add content elements
+            # Process in batches for efficiency
+            batch_size = 50
+            added_elements = 0
 
-            # 8. Add extracted relationships to the concept network
-            for rel in relationships:
-                relationship = ConceptRelationship(
-                    source=rel["source"],
-                    target=rel["target"],
-                    type=RelationType.map_type(rel["relationship_type"]),  # Convert to enum
-                    weight=rel.get("confidence", 0.75),
-                    context=rel.get("context", ""),
-                    extraction_method=rel.get("extraction_method", "document-based")
+            for i in range(0, len(elements), batch_size):
+                batch = elements[i:i+batch_size]
+                for element in batch:
+                    await self.vector_store.add_content_element(element, self.pdf_id)
+                    added_elements += 1
+
+                logger.info(f"Added {added_elements}/{len(elements)} elements to unified store")
+
+            # 3. Add concept network data
+            # Add concepts
+            for concept in self.concept_network.concepts:
+                await self.vector_store.add_concept(
+                    concept_name=concept.name,
+                    pdf_id=self.pdf_id,
+                    metadata={
+                        "importance": concept.importance_score,
+                        "is_primary": concept.is_primary,
+                        "category": concept.category
+                    }
                 )
-                self.concept_network.add_relationship(relationship)
 
-            # 9. Calculate importance scores and identify primary concepts
-            self.concept_network.calculate_importance_scores()
+            # Add relationships
+            for relationship in self.concept_network.relationships:
+                rel_type = relationship.type
+                if hasattr(rel_type, 'value'):
+                    rel_type = rel_type.value
 
-            # 10. Build section to concept mapping
-            self.concept_network.build_section_concept_map()
+                await self.vector_store.add_concept_relationship(
+                    source=relationship.source,
+                    target=relationship.target,
+                    rel_type=str(rel_type),
+                    pdf_id=self.pdf_id,
+                    metadata={
+                        "weight": relationship.weight,
+                        "context": relationship.context
+                    }
+                )
 
-            # 11. Register with research manager for reuse
-            if self.research_manager:
-                self._handle_research_manager_integration(self.concept_network)
+            # Add section-concept relationships
+            if hasattr(self.concept_network, 'section_concepts'):
+                for section, concepts in self.concept_network.section_concepts.items():
+                    for concept in concepts:
+                        await self.vector_store.add_section_concept_relation(
+                            section=section,
+                            concept=concept,
+                            pdf_id=self.pdf_id
+                        )
 
-            logger.info(
-                f"Built optimized concept network with {len(concept_objects)} concepts "
-                f"and {len(relationships)} relationships"
-            )
+            # 4. Log success
+            logger.info(f"Successfully ingested content to unified store for {self.pdf_id}")
+            return True
 
         except Exception as e:
-            logger.error(f"Concept network building failed: {e}", exc_info=True)
-            # Don't fail completely, create an empty network
-            self.concept_network = ConceptNetwork()
+            logger.error(f"Failed to ingest content to unified store: {str(e)}", exc_info=True)
+            return False
+
+    async def _update_pdf_metadata(self, document_summary: Dict[str, Any], predicted_category: str) -> None:
+        """
+        Update PDF metadata in the database with document summary and category.
+        Also sets a meaningful description for the PDF.
+
+        Args:
+            document_summary: Document summary with title, concepts, insights, etc.
+            predicted_category: Predicted document category
+        """
+        try:
+            from app.web.db.models import Pdf
+            from app.web.db import db
+
+            # Fetch the PDF record
+            pdf = db.session.execute(
+                db.select(Pdf).filter_by(id=self.pdf_id)
+            ).scalar_one()
+
+            # Prepare metadata to add
+            new_metadata = {
+                'document_summary': document_summary,
+                'predicted_category': predicted_category,
+                'domain_term_counts': dict(self.domain_term_counters),
+                'processing_date': datetime.utcnow().isoformat()
+            }
+
+            # Update metadata using our method
+            pdf.update_metadata(new_metadata)
+
+            # Set category if it's still "general" or not set
+            if not pdf.category or pdf.category == 'general':
+                pdf.category = predicted_category
+
+            # IMPORTANT: Create a meaningful description from the summary
+            description = ""
+
+            # First try using the explicit description field if available
+            if document_summary.get('description'):
+                description = document_summary['description']
+            # Next, try to find a descriptive insight to use
+            elif document_summary.get('key_insights'):
+                # Sort insights by length (descending) to find the most detailed one
+                sorted_insights = sorted(document_summary['key_insights'], key=len, reverse=True)
+                if sorted_insights:
+                    description = sorted_insights[0]
+            # Otherwise, build from title and concepts
+            elif document_summary.get('title'):
+                title = document_summary['title']
+                # Skip generic titles
+                if title != "Technical Document":
+                    description = title
+
+                # Add primary concepts if available
+                if document_summary.get('primary_concepts'):
+                    concepts = document_summary['primary_concepts'][:5]
+                    if concepts:
+                        if description:
+                            description += ". "
+                        description += f"Key concepts: {', '.join(concepts)}"
+
+            # If still no description, create one from category
+            if not description and predicted_category:
+                description = f"Technical documentation related to {predicted_category.capitalize()}. "
+
+                # Add primary concepts if available
+                if document_summary.get('primary_concepts'):
+                    concepts = document_summary['primary_concepts'][:5]
+                    if concepts:
+                        description += f"Key concepts: {', '.join(concepts)}"
+
+            # Set a default if still empty
+            if not description:
+                description = f"Technical document with {len(document_summary.get('section_structure', []))} sections"
+
+            # Trim if too long (database constraint might be 500-1000 chars)
+            max_length = 500
+            if len(description) > max_length:
+                description = description[:max_length-3] + "..."
+
+            # Update the description
+            pdf.description = description
+            logger.info(f"Updated PDF description: {description[:50]}...")
+
+            # Mark as processed
+            pdf.processed = True
+            pdf.error = None
+            pdf.processed_at = datetime.utcnow()
+
+            # Commit changes
+            db.session.commit()
+
+            logger.info(f"Updated PDF metadata with summary, category: {predicted_category}, and description")
+        except Exception as e:
+            logger.error(f"Failed to update PDF metadata: {str(e)}")
+            raise
+
+    async def _update_pdf_error(self, error_message: str) -> None:
+        """
+        Update PDF record with error status.
+
+        Args:
+            error_message: Error message to store
+        """
+        try:
+            from app.web.db.models import Pdf
+            from app.web.db import db
+
+            # Fetch the PDF record
+            pdf = db.session.execute(
+                db.select(Pdf).filter_by(id=self.pdf_id)
+            ).scalar_one()
+
+            # Update error information
+            pdf.processed = False
+            pdf.error = error_message
+            pdf.processed_at = datetime.utcnow()
+
+            # Commit changes
+            db.session.commit()
+            logger.info(f"Updated PDF with error status: {self.pdf_id}")
+        except Exception as e:
+            logger.error(f"Failed to update PDF error status: {str(e)}")
+            raise
+
+    def _add_concepts_to_section(self, section_path: str, concepts: List[str]) -> None:
+        """Add concepts to a section in the concept network."""
+        # Skip if no section path or concepts
+        if not section_path or not concepts:
+            return
+
+        # Add to concept network's section mapping
+        self.concept_network.add_section_concepts(section_path, concepts)
 
     def _handle_research_manager_integration(self, document_title, metadata):
         """Handle integration with research manager with robust error handling."""
@@ -1509,16 +1939,6 @@ class DocumentProcessor:
         except Exception as e:
             logger.warning(f"Research manager integration error: {str(e)}")
 
-
-    def _add_concepts_to_section(self, section_path: str, concepts: List[str]) -> None:
-        """Add concepts to a section in the concept network."""
-        # Skip if no section path or concepts
-        if not section_path or not concepts:
-            return
-
-        # Add to concept network's section mapping
-        self.concept_network.add_section_concepts(section_path, concepts)
-
     def _setup_directories(self) -> None:
         """Setup directory structure for processing outputs."""
         try:
@@ -1539,107 +1959,6 @@ class DocumentProcessor:
             except Exception:
                 pass
 
-    async def _ingest_to_neo4j(self, result: ProcessingResult) -> bool:
-        """
-        Ingest processed content into Neo4j vector store.
-        This is the key connection point between document processing and Neo4j.
-
-        Args:
-            result: Processing result with elements and concept network
-
-        Returns:
-            Success status
-        """
-        logger.info(f"Ingesting processed content to Neo4j for {self.pdf_id}")
-
-        try:
-            # Get Neo4j vector store
-            vector_store = get_vector_store()
-
-            # Verify it's initialized
-            if not vector_store.initialized:
-                logger.error(f"Neo4j vector store not initialized for {self.pdf_id}")
-                return False
-
-            # 1. Create document node first
-            document_title = "Untitled Document"
-            if hasattr(result, 'document_summary') and result.document_summary:
-                if 'title' in result.document_summary:
-                    document_title = result.document_summary['title']
-
-            metadata = {
-                "processed_at": datetime.utcnow().isoformat(),
-                "element_count": len(result.elements),
-                "domain_category": self._predict_document_category(
-                    self._extract_all_technical_terms(result.elements),
-                    result.markdown_content
-                )
-            }
-
-            # Add document summary to metadata if available as a dict
-            if hasattr(result, 'document_summary') and result.document_summary:
-                if hasattr(result.document_summary, 'dict'):
-                    metadata["document_summary"] = result.document_summary.dict()
-                else:
-                    metadata["document_summary"] = dict(result.document_summary)
-
-            await vector_store.create_document_node(
-                pdf_id=self.pdf_id,
-                title=document_title,
-                metadata=metadata
-            )
-            # 2. Add content elements with appropriate relationships
-            for element in result.elements:
-                await vector_store.add_content_element(element, self.pdf_id)
-
-            # 3. Add concepts and their relationships
-            if hasattr(result, 'concept_network') and result.concept_network:
-                # Add concepts
-                for concept in result.concept_network.concepts:
-                    await vector_store.add_concept(
-                        concept_name=concept.name,
-                        pdf_id=self.pdf_id,
-                        metadata={
-                            "importance": concept.importance_score,
-                            "is_primary": concept.is_primary,
-                            "category": concept.category
-                        }
-                    )
-
-                # Add relationships between concepts
-                for relationship in result.concept_network.relationships:
-                    rel_type = relationship.type
-                    if hasattr(rel_type, 'value'):
-                        rel_type = rel_type.value
-
-                    await vector_store.add_concept_relationship(
-                        source=relationship.source,
-                        target=relationship.target,
-                        rel_type=str(rel_type),
-                        pdf_id=self.pdf_id,
-                        metadata={
-                            "weight": relationship.weight,
-                            "context": relationship.context
-                        }
-                    )
-
-                # Add section-concept relationships
-                if hasattr(result.concept_network, 'section_concepts'):
-                    for section, concepts in result.concept_network.section_concepts.items():
-                        for concept in concepts:
-                            await vector_store.add_section_concept_relation(
-                                section=section,
-                                concept=concept,
-                                pdf_id=self.pdf_id
-                            )
-
-            logger.info(f"Successfully ingested content to Neo4j for {self.pdf_id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to ingest content to Neo4j: {str(e)}", exc_info=True)
-            return False
-
     async def _save_results(self, result: ProcessingResult) -> None:
         """Save processing results to disk with comprehensive organization."""
         try:
@@ -1650,44 +1969,7 @@ class DocumentProcessor:
             ]:
                 dir_path.mkdir(parents=True, exist_ok=True)
 
-            # Save elements by type
-            elements_by_type = defaultdict(list)
-            for element in result.elements:
-                elements_by_type[element.content_type.value].append(element.dict())
-
-            for ctype, elements_lst in elements_by_type.items():
-                path = self.output_dir / "content" / f"{ctype}_elements.json"
-                try:
-                    async with aiofiles.open(path, "w") as f:
-                        await f.write(json.dumps(elements_lst, default=str))
-                except Exception as e:
-                    logger.warning(f"Failed to write {ctype} elements: {e}")
-
-            # Save chunks
-            chunks_path = self.output_dir / "content" / "chunks.json"
-            try:
-                async with aiofiles.open(chunks_path, "w") as f:
-                    await f.write(json.dumps(result.chunks, default=str))
-            except Exception as e:
-                logger.warning(f"Failed to write chunks: {e}")
-
-            # Save concept network
-            network_path = self.output_dir / "metadata" / "concept_network.json"
-            try:
-                async with aiofiles.open(network_path, "w") as f:
-                    await f.write(json.dumps(self.concept_network.dict(), default=str))
-            except Exception as e:
-                logger.warning(f"Failed to write concept network: {e}")
-
-            # Save domain term counts
-            counts_path = self.output_dir / "metadata" / "domain_term_counts.json"
-            try:
-                async with aiofiles.open(counts_path, "w") as f:
-                    await f.write(json.dumps(dict(self.domain_term_counters), default=str))
-            except Exception as e:
-                logger.warning(f"Failed to write domain term counts: {e}")
-
-            # Save comprehensive metadata
+            # Save metadata
             meta_data = {
                 "pdf_id": self.pdf_id,
                 "processing_info": {
@@ -1696,21 +1978,10 @@ class DocumentProcessor:
                     "config": self.config.dict(),
                 },
                 "metrics": self.metrics,
-                "content_summary": {
-                    "total_elements": len(result.elements),
-                    "elements_by_type": {k: len(v) for k, v in elements_by_type.items()},
-                    "total_chunks": len(result.chunks),
-                    "concept_count": len(self.concept_network.concepts),
-                    "relationship_count": len(self.concept_network.relationships),
-                    "primary_concepts": self.concept_network.primary_concepts,
-                    "has_markdown": bool(result.markdown_content),
-                    "markdown_path": str(self.markdown_path) if os.path.exists(self.markdown_path) else None,
-                    "section_structure": {
-                        k: v for k, v in self.concept_network.section_concepts.items()
-                    },
-                    "domain_term_counts": dict(self.domain_term_counters)
-                },
-                "neo4j_status": "ingested"  # Add Neo4j status
+                "content_summary": result.get_statistics(),
+                "section_hierarchy": self.section_hierarchy,
+                "domain_term_counts": dict(self.domain_term_counters),
+                "unified_store_status": "ingested"
             }
 
             # Save metadata
@@ -1726,7 +1997,6 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"Failed to save results: {e}")
 
-
 async def process_technical_document(
     pdf_id: str,
     config: Optional[ProcessingConfig] = None,
@@ -1735,8 +2005,8 @@ async def process_technical_document(
     output_dir: Optional[Path] = None
 ) -> ProcessingResult:
     """
-    Process technical document with Neo4j integration and LangGraph compatibility.
-    Optimized for technical documentation with concept extraction and relationship mapping.
+    Process technical document with MongoDB + Qdrant integration.
+    Entry point for document processing pipeline.
 
     Args:
         pdf_id: Document identifier
@@ -1746,9 +2016,9 @@ async def process_technical_document(
         output_dir: Optional custom output directory
 
     Returns:
-        ProcessingResult with LangGraph-ready structured content
+        ProcessingResult with structured content
     """
-    logger.info(f"Starting Neo4j-integrated document processing pipeline for {pdf_id}")
+    logger.info(f"Starting document processing pipeline for {pdf_id}")
 
     # Default config if not provided
     if not config:
@@ -1761,6 +2031,7 @@ async def process_technical_document(
             process_tables=True,
             extract_technical_terms=True,
             extract_relationships=True,
+            extract_procedures=True,
             max_concepts_per_document=200
         )
 
@@ -1776,7 +2047,7 @@ async def process_technical_document(
         processor._setup_directories()
 
     try:
-        # Process document with Neo4j integration
+        # Process document with MongoDB + Qdrant integration
         result = await processor.process_document()
 
         # Add LangGraph-specific metadata
@@ -1792,11 +2063,11 @@ async def process_technical_document(
                 result.markdown_content
             ),
             "processing_timestamp": datetime.utcnow().isoformat(),
-            "neo4j_ready": True  # Indicate Neo4j storage is ready
+            "unified_store_ready": True  # Indicate MongoDB + Qdrant storage is ready
         }
 
         logger.info(
-            f"Completed Neo4j-integrated processing for {pdf_id} with "
+            f"Completed document processing for {pdf_id} with "
             f"{len(result.elements)} elements, "
             f"{len(result.chunks) if hasattr(result, 'chunks') else 0} chunks, and "
             f"{len(processor.concept_network.concepts) if hasattr(processor, 'concept_network') and processor.concept_network else 0} concepts"
@@ -1813,7 +2084,7 @@ async def process_technical_document(
                 "error_type": type(e).__name__,
                 "timestamp": datetime.utcnow().isoformat(),
                 "langgraph_ready": False,
-                "neo4j_ready": False
+                "unified_store_ready": False
             }
         )
         try:
@@ -1825,7 +2096,7 @@ async def process_technical_document(
                     "timestamp": datetime.utcnow().isoformat(),
                     "pdf_id": pdf_id,
                     "langgraph_ready": False,
-                    "neo4j_ready": False
+                    "unified_store_ready": False
                 }, indent=2))
         except Exception:
             pass
