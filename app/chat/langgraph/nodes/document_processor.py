@@ -17,13 +17,7 @@ logger = logging.getLogger(__name__)
 
 def process_document(state: GraphState) -> GraphState:
     """
-    Process a document and extract content for Neo4j vector store.
-
-    Args:
-        state: Current graph state containing document information
-
-    Returns:
-        Updated graph state with processing results
+    Process a document and extract content for unified vector store.
     """
     # Validate state
     if not state.document_state or "pdf_id" not in state.document_state:
@@ -48,7 +42,9 @@ def process_document(state: GraphState) -> GraphState:
             process_images=True,
             process_tables=True,
             extract_technical_terms=True,
-            extract_relationships=True
+            extract_relationships=True,
+            extract_procedures=True,  # Enable procedure extraction
+            max_concepts_per_document=200
         )
 
         # Get OpenAI client
@@ -126,22 +122,6 @@ def process_document(state: GraphState) -> GraphState:
     except Exception as e:
         logger.error(f"Document processing failed: {str(e)}", exc_info=True)
 
-        # Update database record with error
-        try:
-            from app.web.db.models import Pdf
-            from app.web.db import db
-
-            pdf = db.session.execute(
-                db.select(Pdf).filter_by(id=pdf_id)
-            ).scalar_one_or_none()
-
-            if pdf:
-                pdf.processed = False
-                pdf.error = str(e)
-                db.session.commit()
-        except Exception as db_error:
-            logger.error(f"Error updating database record with error: {str(db_error)}")
-
         # Update state with error
         state.document_state["status"] = "error"
         state.document_state["error"] = str(e)
@@ -152,12 +132,6 @@ def process_document(state: GraphState) -> GraphState:
 def _predict_category_from_concepts(concepts: list) -> str:
     """
     Predict document category based on primary concepts.
-
-    Args:
-        concepts: List of primary concepts
-
-    Returns:
-        Predicted category
     """
     # Define concept keywords for each category
     category_keywords = {
@@ -167,7 +141,7 @@ def _predict_category_from_concepts(concepts: list) -> str:
         "honeywell": {"honeywell", "webs", "excel", "wpa", "spyder", "lyric", "vista", "notifier",
                      "comfort", "controlpoint", "tps"},
 
-        "johnson_controls": {"johnson", "metasys", "fec", "nae", "ncm", "vav", "bacnet", "n2",
+        "johnson_controls": {"johnson", "metasys", "nae", "ncm", "vav", "bacnet", "n2",
                             "fac", "facility explorer", "verasys"}
     }
 

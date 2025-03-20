@@ -12,17 +12,18 @@ from app.web.views import (
     client_views,
     conversation_views,
     stream_views,
-    health_views, # Import health_views here
+    health_views,
 )
-# Import the new async wrapper
+# Import the async wrapper
 from app.web.async_wrapper import async_handler, run_async
 import os
 import logging
 from logging.handlers import RotatingFileHandler
-from langsmith import Client
 import sys
 from dotenv import load_dotenv
 import asyncio
+import time
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -30,20 +31,15 @@ load_dotenv()
 # Configure TensorFlow
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
-# Configure LangSmith and LangGraph Studio
-os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGCHAIN_TRACING_V2", "false")
-if os.getenv("LANGCHAIN_ENDPOINT"):
-    os.environ["LANGCHAIN_ENDPOINT"] = os.getenv("LANGCHAIN_ENDPOINT")
-if os.getenv("LANGCHAIN_API_KEY"):
-    os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
-if os.getenv("LANGCHAIN_PROJECT"):
-    os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT")
+# Configure MongoDB and Qdrant (replacing Neo4j)
+if not os.getenv("MONGODB_URI"):
+    os.environ["MONGODB_URI"] = "mongodb://localhost:27017/"
+    os.environ["MONGODB_DB_NAME"] = "tech_rag"
 
-# Configure Neo4j (optional environment variables check)
-if not os.getenv("NEO4J_URL"):
-    os.environ["NEO4J_URL"] = "bolt://localhost:7687"
-    os.environ["NEO4J_USER"] = "neo4j"
-    os.environ["NEO4J_PASSWORD"] = "password"
+if not os.getenv("QDRANT_HOST"):
+    os.environ["QDRANT_HOST"] = "localhost"
+    os.environ["QDRANT_PORT"] = "6333"
+    os.environ["QDRANT_COLLECTION"] = "content_vectors"
 
 # Initialize nest_asyncio for better event loop handling
 try:
@@ -55,10 +51,130 @@ except ImportError:
 except Exception as e:
     logging.warning(f"Error applying nest_asyncio: {str(e)}")
 
-# Initialize LangSmith client for tracing and visualization
-langsmith_client = Client()
-
 migrate = Migrate()
+
+class RAGMonitor:
+    """
+    Custom monitoring solution for RAG operations.
+    Stores metrics in MongoDB for visualization and analysis.
+    """
+
+    def __init__(self, mongo_client=None):
+        self.mongo_client = mongo_client
+        self.db_name = os.getenv("MONITORING_DB_NAME", "rag_monitoring")
+        self.collection_name = "metrics"
+        self._initialized = False
+        self._init_db()
+
+    def _init_db(self):
+        if not self.mongo_client:
+            from pymongo import MongoClient
+            mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")
+            self.mongo_client = MongoClient(mongo_uri)
+
+        self.db = self.mongo_client[self.db_name]
+        self.metrics = self.db[self.collection_name]
+
+        # Create indexes
+        self.metrics.create_index("timestamp")
+        self.metrics.create_index("operation")
+        self.metrics.create_index("pdf_id")
+
+        self._initialized = True
+
+    def record_operation(self, operation, details=None, pdf_id=None, duration_ms=None):
+        """Record an operation for monitoring."""
+        if not self._initialized:
+            self._init_db()
+
+        metric = {
+            "timestamp": datetime.utcnow(),
+            "operation": operation,
+            "pdf_id": pdf_id,
+            "duration_ms": duration_ms,
+            "details": details or {}
+        }
+
+        self.metrics.insert_one(metric)
+
+    def record_query(self, query, pdf_ids, results_count, duration_ms, strategy):
+        """Record a query operation."""
+        details = {
+            "query": query,
+            "pdf_ids": pdf_ids,
+            "results_count": results_count,
+            "strategy": strategy
+        }
+
+        self.record_operation(
+            operation="query",
+            details=details,
+            pdf_id=pdf_ids[0] if pdf_ids else None,
+            duration_ms=duration_ms
+        )
+
+    def record_processing(self, pdf_id, element_count, chunk_count, duration_ms):
+        """Record document processing."""
+        details = {
+            "element_count": element_count,
+            "chunk_count": chunk_count
+        }
+
+        self.record_operation(
+            operation="processing",
+            details=details,
+            pdf_id=pdf_id,
+            duration_ms=duration_ms
+        )
+
+    def get_recent_operations(self, limit=100):
+        """Get recent operations for dashboard."""
+        return list(self.metrics.find().sort("timestamp", -1).limit(limit))
+
+    def get_pdf_metrics(self, pdf_id):
+        """Get metrics for a specific PDF."""
+        return list(self.metrics.find({"pdf_id": pdf_id}).sort("timestamp", -1))
+
+def initialize_vector_stores(app):
+    """Initialize MongoDB and Qdrant connections."""
+    from app.chat.vector_stores import get_mongo_store, get_qdrant_store, get_vector_store
+
+    app.logger.info("Initializing MongoDB connection...")
+    mongo_store = get_mongo_store()
+
+    app.logger.info("Initializing Qdrant vector store...")
+    qdrant_store = get_qdrant_store()
+
+    app.logger.info("Initializing unified vector store...")
+    vector_store = get_vector_store()
+
+    # Set stores in app config for access in views
+    app.config['MONGO_STORE'] = mongo_store
+    app.config['QDRANT_STORE'] = qdrant_store
+    app.config['VECTOR_STORE'] = vector_store
+
+    # Verify connections
+    try:
+        asyncio.run(async_connection_check(app, vector_store))
+    except Exception as e:
+        app.logger.error(f"Database connection check failed: {str(e)}")
+
+    app.logger.info("Vector stores initialized")
+
+async def async_connection_check(app, vector_store):
+    """Check database connections asynchronously."""
+    try:
+        health = await vector_store.check_health()
+        app.logger.info(f"Database health check: {health['status']}")
+
+        if health['status'] != 'ok':
+            app.logger.warning(f"Database health check returned status: {health['status']}")
+            if 'mongo_status' in health:
+                app.logger.warning(f"MongoDB status: {health['mongo_status'].get('status')}")
+            if 'qdrant_status' in health:
+                app.logger.warning(f"Qdrant status: {health['qdrant_status'].get('status')}")
+    except Exception as e:
+        app.logger.error(f"Database health check failed: {str(e)}")
 
 def create_app():
     app = Flask(__name__, static_folder="../../client/build")
@@ -66,12 +182,9 @@ def create_app():
     app.config.from_object(Config)
 
     # Log configuration status
-    app.logger.info("Neo4j vector store configuration loaded")
-    app.logger.info(f"Using Neo4j at: {os.getenv('NEO4J_URL')}")
-
-    # Set up LangGraph Studio integration if enabled
-    if os.getenv("LANGGRAPH_STUDIO_ENABLED", "true").lower() == "true":
-        app.logger.info("LangGraph Studio integration enabled")
+    app.logger.info("MongoDB and Qdrant vector store configuration loaded")
+    app.logger.info(f"Using MongoDB at: {os.getenv('MONGODB_URI')}")
+    app.logger.info(f"Using Qdrant at: {os.getenv('QDRANT_HOST')}:{os.getenv('QDRANT_PORT')}")
 
     # Initialize asyncio policy for better Windows support if needed
     if sys.platform == 'win32':
@@ -81,6 +194,13 @@ def create_app():
     register_extensions(app)
     register_hooks(app)
     register_blueprints(app)
+
+    # Initialize vector stores
+    initialize_vector_stores(app)
+
+    # Initialize monitoring
+    app.config['RAG_MONITOR'] = RAGMonitor()
+    app.logger.info("RAG monitoring initialized")
 
     if Config.CELERY["broker_url"]:
         celery_init_app(app)
@@ -127,7 +247,7 @@ def register_blueprints(app):
     app.register_blueprint(pdf_views.bp)
     app.register_blueprint(conversation_views.bp)
     app.register_blueprint(client_views.bp)
-    app.register_blueprint(health_views.bp) #Register the health view
+    app.register_blueprint(health_views.bp)
 
     # Stream views are no longer needed as we handle streaming in conversation_views
     # But keep it registered for backward compatibility

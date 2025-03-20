@@ -1,5 +1,5 @@
 """
-PDF RAG system with LangGraph architecture and Neo4j integration.
+PDF RAG system with LangGraph architecture and MongoDB/Qdrant integration.
 Provides document processing, querying, and multi-document research capabilities.
 """
 
@@ -10,39 +10,29 @@ logger = logging.getLogger(__name__)
 from app.chat.types import (
     # Core Enums
     ContentType,
+    ChunkLevel,
+    EmbeddingType,
     ResearchMode,
     RelationType,
+
+    # Content Element Models
+    ContentMetadata,
+    ContentElement,
+
+    # Chunking Models
+    ChunkMetadata,
+    DocumentChunk,
 
     # Concept Models
     Concept,
     ConceptRelationship,
     ConceptNetwork,
 
-    # Image Models
-    ImageFeatures,
-    ImageAnalysis,
-    ImagePaths,
-    ImageMetadata,
-
-    # Table Models
-    TableData,
-
-    # Core Models
-    ContentElement,
-    ContentMetadata,
-
-    # Research Models
-    ResearchManager,
-    ResearchContext,
-
-    # Search Models
-    SearchQuery,
-
     # Processing Models
-    ProcessingResult,
     ProcessingConfig,
+    ProcessingResult,
 
-    # Chat Models
+    # Chat Management Models
     ChatArgs
 )
 
@@ -52,11 +42,30 @@ from app.chat.chat_manager import ChatManager
 # Document processor for PDF processing
 from app.chat.document_fetcher import process_technical_document
 
-# Vector store for Neo4j access
-from app.chat.vector_stores import get_vector_store, Neo4jVectorStore
+# Vector store for database access
+from app.chat.vector_stores import (
+    get_vector_store,
+    get_mongo_store,
+    get_qdrant_store,
+    UnifiedVectorStore
+)
 
 # Memory manager for conversation persistence
 from app.chat.memories.memory_manager import MemoryManager
+
+# LangGraph components
+from app.chat.langgraph import (
+    GraphState,
+    QueryState,
+    RetrievalState,
+    GenerationState,
+    ResearchState,
+    ConversationState,
+
+    create_document_graph,
+    create_query_graph,
+    create_research_graph
+)
 
 def initialize_chat(chat_args):
     """
@@ -82,11 +91,28 @@ def initialize_chat(chat_args):
 
     return chat_manager
 
+def initialize_vector_stores():
+    """Initialize MongoDB and Qdrant vector stores."""
+    logger.info("Initializing vector stores...")
+
+    mongo_store = get_mongo_store()
+    qdrant_store = get_qdrant_store()
+    vector_store = get_vector_store()
+
+    # Initialize connections
+    if hasattr(vector_store, "initialize"):
+        vector_store.initialize()
+
+    logger.info("Vector stores initialized")
+    return vector_store
+
 __all__ = [
     # Core Enums
     "ContentType",
     "ResearchMode",
     "RelationType",
+    "ChunkLevel",
+    "EmbeddingType",
 
     # Concept Models
     "Concept",
@@ -112,6 +138,7 @@ __all__ = [
 
     # Search Models
     "SearchQuery",
+    "SearchResult",
 
     # Processing Models
     "ProcessingResult",
@@ -120,8 +147,22 @@ __all__ = [
     # Chat Models
     "ChatArgs",
 
+    # LangGraph States
+    "GraphState",
+    "QueryState",
+    "RetrievalState",
+    "GenerationState",
+    "ResearchState",
+    "ConversationState",
+
+    # LangGraph Graphs
+    "create_document_graph",
+    "create_query_graph",
+    "create_research_graph",
+
     # Chat Functions
     "initialize_chat",
+    "initialize_vector_stores",
     "ChatManager",
 
     # Document Processing
@@ -129,7 +170,9 @@ __all__ = [
 
     # Vector Store
     "get_vector_store",
-    "Neo4jVectorStore",
+    "get_mongo_store",
+    "get_qdrant_store",
+    "UnifiedVectorStore",
 
     # Memory Management
     "MemoryManager"

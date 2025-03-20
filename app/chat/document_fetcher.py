@@ -1680,16 +1680,6 @@ class DocumentProcessor:
     ) -> bool:
         """
         Ingest processed content into unified store (MongoDB + Qdrant).
-        Replaces the Neo4j ingestion in the original implementation.
-
-        Args:
-            elements: Content elements to store
-            chunks: Document chunks to store
-            document_summary: Document summary information
-            predicted_category: Predicted document category
-
-        Returns:
-            Success status
         """
         logger.info(f"Ingesting processed content to unified store for {self.pdf_id}")
 
@@ -1710,8 +1700,7 @@ class DocumentProcessor:
                 metadata=metadata
             )
 
-            # 2. Add content elements
-            # Process in batches for efficiency
+            # 2. Add content elements in batches
             batch_size = 50
             added_elements = 0
 
@@ -1763,7 +1752,15 @@ class DocumentProcessor:
                             pdf_id=self.pdf_id
                         )
 
-            # 4. Log success
+            # 4. Add procedures and parameters
+            if hasattr(self, 'procedures') and self.procedures:
+                for procedure in self.procedures:
+                    await self.vector_store.add_procedure(procedure, self.pdf_id)
+
+            if hasattr(self, 'parameters') and self.parameters:
+                for parameter in self.parameters:
+                    await self.vector_store.add_parameter(parameter, self.pdf_id)
+
             logger.info(f"Successfully ingested content to unified store for {self.pdf_id}")
             return True
 
