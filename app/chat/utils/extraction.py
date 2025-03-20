@@ -1,6 +1,6 @@
 """
-Utilities for extracting technical terms and relationships from text.
-Optimized for technical documentation analysis.
+Centralized extraction utilities for technical document analysis.
+Provides consistent implementations for term and relationship extraction.
 """
 
 import re
@@ -12,14 +12,13 @@ from enum import Enum, auto
 
 __all__ = [
     "extract_technical_terms",
-    "extract_technical_terms_regex",
-    "extract_technical_terms_spacy",
     "extract_concept_relationships",
     "extract_document_relationships",
     "extract_hierarchy_relationships",
+    "extract_procedures_and_parameters",
     "find_best_term_match",
     "RelationType",
-    "COMMON_TECHNICAL_CATEGORIES"  # Export this for use in other modules
+    "DOMAIN_SPECIFIC_TERMS"
 ]
 
 logger = logging.getLogger(__name__)
@@ -33,9 +32,8 @@ except (ImportError, OSError):
     SPACY_AVAILABLE = False
     logger.warning("spaCy model not available, falling back to regex patterns for term extraction")
 
-# Common technical terminology categories that can appear in technical documents
-# Enhanced with additional domains from utils.py
-COMMON_TECHNICAL_CATEGORIES = {
+# Common technical terminology categories for domain-specific extraction
+DOMAIN_SPECIFIC_TERMS = {
     # Programming and Development
     "programming": ["function", "method", "class", "object", "variable", "parameter", "argument",
                    "api", "interface", "library", "framework", "runtime", "compiler", "interpreter"],
@@ -73,26 +71,6 @@ COMMON_TECHNICAL_CATEGORIES = {
                  "structure", "organization", "tags", "tagging", "spaces"]
 }
 
-# Domain-specific terms used by document processing
-# This is maintained for backward compatibility if other code expects it
-DOMAIN_SPECIFIC_TERMS = COMMON_TECHNICAL_CATEGORIES
-
-# Common technical document content sections
-CONTENT_SECTION_PATTERNS = [
-    r"(?i)^#+\s*(introduction|overview|background|context)",
-    r"(?i)^#+\s*(architecture|design|structure|system|framework)",
-    r"(?i)^#+\s*(implementation|development|code|solution)",
-    r"(?i)^#+\s*(api|endpoint|method|function|parameter)",
-    r"(?i)^#+\s*(database|storage|data model|schema)",
-    r"(?i)^#+\s*(usage|examples|tutorial|how to|guide)",
-    r"(?i)^#+\s*(installation|setup|configuration|deployment)",
-    r"(?i)^#+\s*(limitations|constraints|challenges|issues)",
-    r"(?i)^#+\s*(security|authentication|authorization)",
-    r"(?i)^#+\s*(testing|validation|verification)",
-    r"(?i)^#+\s*(performance|optimization|scalability|efficiency)",
-    r"(?i)^#+\s*(future work|roadmap|todo|planned features)"
-]
-
 class RelationType(str, Enum):
     """Relationship types between technical concepts."""
     PART_OF = "part_of"           # Component is part of a larger system
@@ -101,10 +79,26 @@ class RelationType(str, Enum):
     EXTENDS = "extends"           # Component extends/inherits from another
     RELATES_TO = "relates_to"     # General relationship between components
     CONFIGURES = "configures"     # One component configures another
-    PRECEDES = "precedes"         # Sequential/process relationship
-    ALTERNATIVE = "alternative"   # Component is an alternative to another
-    INCOMPATIBLE = "incompatible" # Components cannot be used together
-    UNKNOWN = "unknown"           # Relationship type couldn't be determined
+    PREREQUISITE = "prerequisite" # One step/procedure requires another first
+    REFERENCES = "references"     # One document refers to another
+
+    @classmethod
+    def map_type(cls, type_str: str) -> 'RelationType':
+        """Map a string to a RelationType."""
+        mapping = {
+            "part_of": cls.PART_OF,
+            "uses": cls.USES,
+            "implements": cls.IMPLEMENTS,
+            "extends": cls.EXTENDS,
+            "relates_to": cls.RELATES_TO,
+            "configures": cls.CONFIGURES,
+            "prerequisite": cls.PREREQUISITE,
+            "references": cls.REFERENCES,
+            "is_a": cls.EXTENDS,
+            "has_a": cls.PART_OF,
+            "contains": cls.PART_OF
+        }
+        return mapping.get(type_str.lower(), cls.RELATES_TO)
 
 def extract_technical_terms(text: str) -> List[str]:
     """
@@ -185,7 +179,7 @@ def extract_technical_terms_regex(text: str) -> List[str]:
         terms.update(matches)
 
     # Extract from common categories
-    for category, category_terms in COMMON_TECHNICAL_CATEGORIES.items():
+    for category, category_terms in DOMAIN_SPECIFIC_TERMS.items():
         for term in category_terms:
             if re.search(r'\b' + re.escape(term) + r'\b', text.lower()):
                 terms.add(term)
@@ -317,11 +311,10 @@ def extract_concept_relationships(
     # Extract technical terms if known_concepts not provided
     if not known_concepts:
         technical_terms = extract_technical_terms(text)
-    else:
-        technical_terms = list(known_concepts)
+        known_concepts = set(technical_terms)
 
-    # Use document relationship extraction
-    return extract_document_relationships(text, technical_terms, min_confidence)
+    # Use document relationship extraction with expanded confidence options
+    return extract_document_relationships(text, list(known_concepts), min_confidence)
 
 def extract_document_relationships(
     text: str,
@@ -345,28 +338,43 @@ def extract_document_relationships(
     # Relationship patterns and their confidence scores
     relationship_patterns = [
         # "X is a Y" pattern (strong hierarchical)
-        (r'(?i)\b(%s)\s+is\s+(?:a|an)\s+(%s)\b', 0.9),
+        (r'(?i)\b(%s)\s+is\s+(?:a|an)\s+(%s)\b', 0.9, "is_a"),
 
         # "X is part of Y" pattern (strong compositional)
-        (r'(?i)\b(%s)\s+is\s+(?:part|component)\s+of\s+(%s)\b', 0.9),
+        (r'(?i)\b(%s)\s+is\s+(?:part|component)\s+of\s+(%s)\b', 0.9, "part_of"),
 
         # "X contains Y" pattern (compositional)
-        (r'(?i)\b(%s)\s+contains\s+(%s)\b', 0.8),
+        (r'(?i)\b(%s)\s+contains\s+(%s)\b', 0.8, "contains"),
 
         # "X consists of Y" pattern (compositional)
-        (r'(?i)\b(%s)\s+consists\s+of\s+(%s)\b', 0.8),
+        (r'(?i)\b(%s)\s+consists\s+of\s+(%s)\b', 0.8, "contains"),
 
         # "X has Y" pattern (moderate compositional)
-        (r'(?i)\b(%s)\s+has\s+(?:a|an)?\s*(%s)\b', 0.7),
+        (r'(?i)\b(%s)\s+has\s+(?:a|an)?\s*(%s)\b', 0.7, "has_a"),
 
         # "Y in X" pattern (moderate associative)
-        (r'(?i)\b(%s)\s+in\s+(?:the|a|an)?\s*(%s)\b', 0.6),
+        (r'(?i)\b(%s)\s+in\s+(?:the|a|an)?\s*(%s)\b', 0.6, "in"),
+
+        # "X uses Y" pattern (usage relationship)
+        (r'(?i)\b(%s)\s+(?:uses|utilizes|requires)\s+(%s)\b', 0.8, "uses"),
+
+        # "X implements Y" pattern (implementation relationship)
+        (r'(?i)\b(%s)\s+implements\s+(%s)\b', 0.9, "implements"),
+
+        # "X extends Y" pattern (extension relationship)
+        (r'(?i)\b(%s)\s+(?:extends|inherits from)\s+(%s)\b', 0.9, "extends"),
+
+        # "X configures Y" pattern (configuration relationship)
+        (r'(?i)\b(%s)\s+configures\s+(%s)\b', 0.8, "configures"),
+
+        # "X before Y" pattern (sequence relationship)
+        (r'(?i)\b(%s)\s+(?:before|precedes|prior to)\s+(%s)\b', 0.7, "prerequisite"),
 
         # "Y of X" pattern (weak associative)
-        (r'(?i)\b(%s)\s+of\s+(?:the|a|an)?\s*(%s)\b', 0.5),
+        (r'(?i)\b(%s)\s+of\s+(?:the|a|an)?\s*(%s)\b', 0.5, "of"),
 
         # "X and Y" pattern (very weak associative)
-        (r'(?i)\b(%s)\s+and\s+(%s)\b', 0.3)
+        (r'(?i)\b(%s)\s+and\s+(%s)\b', 0.3, "associated_with")
     ]
 
     relationships = []
@@ -385,55 +393,85 @@ def extract_document_relationships(
             term2_escaped = escaped_terms[j]
 
             # Check for relationships using patterns
-            for pattern_template, confidence in relationship_patterns:
+            for pattern_template, confidence, rel_type in relationship_patterns:
                 # Create pattern with the current terms
-                pattern = pattern_template % (term1_escaped, term2_escaped)
-                matches = re.findall(pattern, text)
+                pattern1 = pattern_template % (term1_escaped, term2_escaped)
+                matches1 = re.findall(pattern1, text)
 
-                if matches:
+                pattern2 = pattern_template % (term2_escaped, term1_escaped)
+                matches2 = re.findall(pattern2, text)
+
+                # Process first pattern direction
+                if matches1:
                     # Extract context surrounding the match
-                    for match in matches:
-                        # Find match position
-                        match_text = f"{term1} {match} {term2}"
-                        match_pos = text.lower().find(match_text.lower())
+                    match_text = f"{term1} {rel_type} {term2}"
+                    match_pos = text.lower().find(match_text.lower())
 
-                        if match_pos >= 0:
-                            # Extract context (50 chars before and after)
-                            start = max(0, match_pos - 50)
-                            end = min(len(text), match_pos + len(match_text) + 50)
-                            context = text[start:end]
+                    if match_pos >= 0:
+                        # Extract context (50 chars before and after)
+                        start = max(0, match_pos - 50)
+                        end = min(len(text), match_pos + len(match_text) + 50)
+                        context = text[start:end]
 
-                            # Add relationship if confidence is high enough
-                            if confidence >= min_confidence:
-                                relationship = {
-                                    "source": term1,
-                                    "target": term2,
-                                    "confidence": confidence,
-                                    "context": context.strip(),
-                                    "relationship_type": _infer_relationship_type(pattern_template)
-                                }
-                                relationships.append(relationship)
+                        # Add relationship if confidence is high enough
+                        if confidence >= min_confidence:
+                            relationship = {
+                                "source": term1,
+                                "target": term2,
+                                "confidence": confidence,
+                                "context": context.strip(),
+                                "relationship_type": rel_type
+                            }
+                            relationships.append(relationship)
 
-    return relationships
+                # Process reversed pattern direction
+                if matches2:
+                    # For certain relationship types, reverse the direction (source/target)
+                    # to maintain semantic correctness
+                    rev_rel_type = rel_type
 
-def _infer_relationship_type(pattern_template: str) -> str:
-    """Infer relationship type from pattern template."""
-    if "is a" in pattern_template:
-        return "is_a"
-    elif "part of" in pattern_template or "component of" in pattern_template:
-        return "part_of"
-    elif "contains" in pattern_template or "consists of" in pattern_template:
-        return "contains"
-    elif "has" in pattern_template:
-        return "has"
-    elif "in" in pattern_template:
-        return "in"
-    elif "of" in pattern_template:
-        return "of"
-    elif "and" in pattern_template:
-        return "associated_with"
-    else:
-        return "related_to"
+                    # These relationship types need to be flipped when the pattern is reversed
+                    if rel_type == "is_a":
+                        rev_rel_type = "contains"
+                    elif rel_type == "part_of":
+                        rev_rel_type = "contains"
+                    elif rel_type == "in":
+                        rev_rel_type = "contains"
+                    elif rel_type == "extends":
+                        rev_rel_type = "is_extended_by"
+
+                    # Extract context surrounding the match
+                    match_text = f"{term2} {rev_rel_type} {term1}"
+                    match_pos = text.lower().find(match_text.lower())
+
+                    if match_pos >= 0:
+                        # Extract context (50 chars before and after)
+                        start = max(0, match_pos - 50)
+                        end = min(len(text), match_pos + len(match_text) + 50)
+                        context = text[start:end]
+
+                        # Add relationship if confidence is high enough
+                        if confidence >= min_confidence:
+                            relationship = {
+                                "source": term2,
+                                "target": term1,
+                                "confidence": confidence,
+                                "context": context.strip(),
+                                "relationship_type": rev_rel_type
+                            }
+                            relationships.append(relationship)
+
+    # Deduplicate relationships
+    unique_relationships = []
+    seen = set()
+
+    for rel in relationships:
+        key = f"{rel['source']}|{rel['relationship_type']}|{rel['target']}"
+        if key not in seen:
+            unique_relationships.append(rel)
+            seen.add(key)
+
+    return unique_relationships
 
 def extract_hierarchy_relationships(
     text: str,
@@ -681,16 +719,15 @@ def _extract_steps(text: str) -> List[Dict[str, Any]]:
 
     # Patterns for step detection
     step_patterns = [
-        r"(?:^|\n)(?:\s*)(\d+)\.\s+(.+)(?:\n|$)",     # 1. Step one
-        r"(?:^|\n)(?:\s*)Step\s+(\d+)\.\s+(.+)(?:\n|$)",  # Step 1. Do this
-        r"(?:^|\n)(?:\s*)(\d+)\)\s+(.+)(?:\n|$)",     # 1) Step one
-        r"(?:^|\n)(?:\s*)Step\s+(\d+)(?:\s*)?:(?:\s*)(.+)(?:\n|$)"  # Step 1: Do this
+        r"(?:^|\n)(?:\s*)(\d+)\.\s+(.+?)(?=\n\d+\.|$)",     # 1. Step one
+        r"(?:^|\n)(?:\s*)Step\s+(\d+)\.\s+(.+?)(?=\n\s*Step\s+\d+\.|$)",  # Step 1. Do this
+        r"(?:^|\n)(?:\s*)(\d+)\)\s+(.+?)(?=\n\d+\)|$)",     # 1) Step one
+        r"(?:^|\n)(?:\s*)Step\s+(\d+)(?:\s*)?:(?:\s*)(.+?)(?=\n\s*Step\s+\d+|$)"  # Step 1: Do this
     ]
 
     # Try each pattern
     for pattern in step_patterns:
-        matches = re.finditer(pattern, text, re.MULTILINE)
-
+        matches = re.finditer(pattern, text, re.DOTALL)
         for match in matches:
             step_num = match.group(1)
             step_text = match.group(2).strip()
@@ -714,6 +751,29 @@ def _extract_steps(text: str) -> List[Dict[str, Any]]:
                 "warnings": warnings,
                 "parameters": [p["name"] for p in parameters]
             })
+
+    # If no steps found with the first set of patterns, try simpler ones
+    if not steps:
+        simpler_patterns = [
+            r"(\d+)\.\s+(.*?)(?=\n\d+\.|\Z)",  # Simpler number + period pattern
+            r"(\d+)\)\s+(.*?)(?=\n\d+\)|\Z)"   # Simpler number + parenthesis pattern
+        ]
+
+        for pattern in simpler_patterns:
+            matches = re.finditer(pattern, text, re.DOTALL)
+            for match in matches:
+                step_num = match.group(1)
+                step_text = match.group(2).strip()
+
+                if not step_text:
+                    continue
+
+                steps.append({
+                    "step_number": int(step_num),
+                    "content": step_text,
+                    "warnings": [],
+                    "parameters": []
+                })
 
     # Sort steps by number
     steps.sort(key=lambda x: x["step_number"])

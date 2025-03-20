@@ -1,6 +1,7 @@
 """
 Response generator node for LangGraph-based PDF RAG system.
-Enhanced to use retrieved content from MongoDB + Qdrant with multi-level chunking.
+Generates comprehensive responses using retrieved content and knowledge synthesis.
+Supports both single-document and research modes.
 """
 
 import logging
@@ -77,6 +78,9 @@ Retrieved Content:
 Cross-Document Insights:
 {insights}
 
+Document Information:
+{document_info}
+
 Your task:
 1. Answer the query by synthesizing information across all documents
 2. Highlight similarities, differences, and complementary information between documents
@@ -93,6 +97,7 @@ def generate_response(state: GraphState) -> GraphState:
     """
     Generate the final response based on retrieved content and knowledge synthesis.
     Enhanced to handle multi-level chunks and procedure-specific results.
+    Supports both single-document and research modes.
 
     Args:
         state: Current graph state containing retrieval results and knowledge synthesis
@@ -148,12 +153,16 @@ def generate_response(state: GraphState) -> GraphState:
         if state.query_state.pdf_ids and len(state.query_state.pdf_ids) > 1:
             is_research_mode = True
             logger.info("Using research mode for response generation")
+        elif state.retrieval_state.metadata and state.retrieval_state.metadata.get("research_mode"):
+            is_research_mode = True
+            logger.info("Research mode detected in retrieval metadata")
 
         # Determine if this is a procedure-focused query
         is_procedure_query = state.query_state.procedure_focused
 
         # Check if we have procedure results
-        has_procedures = (state.retrieval_state.procedures_retrieved and
+        has_procedures = (hasattr(state.retrieval_state, 'procedures_retrieved') and
+                         state.retrieval_state.procedures_retrieved and
                          len(state.retrieval_state.procedures_retrieved) > 0)
 
         # Prioritize procedure handling if applicable
@@ -163,9 +172,6 @@ def generate_response(state: GraphState) -> GraphState:
 
         # Format retrieved content for the prompt
         content_str, citation_map = format_retrieved_content(state.retrieval_state.elements)
-
-        # Format document titles for research mode
-        document_titles = get_document_titles(state.retrieval_state.elements)
 
         # Format knowledge synthesis if available
         synthesis_str = ""
@@ -180,12 +186,16 @@ def generate_response(state: GraphState) -> GraphState:
         # Initialize OpenAI client
         client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-        # Choose prompt based on research mode
+        # Choose appropriate prompt based on mode
         if is_research_mode:
+            # Get document information for research mode
+            document_info = format_document_information(state)
+
             prompt = RESEARCH_MODE_PROMPT.format(
                 query=state.query_state.query,
                 content=content_str,
-                insights=insights_str or "No specific cross-document insights available."
+                insights=insights_str or "No specific cross-document insights available.",
+                document_info=document_info
             )
         else:
             prompt = RESPONSE_GENERATION_PROMPT.format(
@@ -194,15 +204,9 @@ def generate_response(state: GraphState) -> GraphState:
                 synthesis=synthesis_str or "No knowledge synthesis available."
             )
 
-        # Add context about available documents in research mode
-        if is_research_mode:
-            prompt += "\n\nAvailable Documents:\n"
-            for pdf_id, title in document_titles.items():
-                prompt += f"- {title} (ID: {pdf_id})\n"
-
         # Call the OpenAI API
         response = client.chat.completions.create(
-            model="gpt-4",  # Use the most capable model
+            model="gpt-4",  # Using GPT-4 for improved response quality
             messages=[
                 {"role": "system", "content": "You are an expert assistant for technical documentation."},
                 {"role": "user", "content": prompt}
@@ -229,10 +233,9 @@ def generate_response(state: GraphState) -> GraphState:
                     "total_tokens": response.usage.total_tokens
                 },
                 "research_mode": is_research_mode,
-                "document_titles": document_titles,
-                "document_count": len(document_titles),
-                "chunk_levels_used": state.retrieval_state.chunk_levels_used,
-                "embedding_types_used": state.retrieval_state.embedding_types_used
+                "document_count": len(state.query_state.pdf_ids) if state.query_state.pdf_ids else 1,
+                "chunk_levels_used": state.retrieval_state.chunk_levels_used if hasattr(state.retrieval_state, 'chunk_levels_used') else [],
+                "embedding_types_used": state.retrieval_state.embedding_types_used if hasattr(state.retrieval_state, 'embedding_types_used') else []
             },
             token_usage={
                 "prompt_tokens": response.usage.prompt_tokens,
@@ -275,8 +278,8 @@ def generate_procedure_response(state: GraphState) -> GraphState:
     """
     try:
         # Get procedure results and parameter results
-        procedures = state.retrieval_state.procedures_retrieved
-        parameters = state.retrieval_state.parameters_retrieved
+        procedures = state.retrieval_state.procedures_retrieved if hasattr(state.retrieval_state, 'procedures_retrieved') else []
+        parameters = state.retrieval_state.parameters_retrieved if hasattr(state.retrieval_state, 'parameters_retrieved') else []
 
         # Format procedures for the prompt
         procedures_str = ""
@@ -291,8 +294,8 @@ def generate_procedure_response(state: GraphState) -> GraphState:
 
             # Add to citation map
             citation_map[citation_id] = {
-                "id": proc.get("id", "") or proc.get("element_id", f"proc_{i}"),
-                "type": proc.get("content_type", "procedure"),
+                "id": proc.get("id", "") or proc.get("element_id", f"proc_{i}") or proc.get("procedure_id", f"proc_{i}"),
+                "type": "procedure",
                 "pdf_id": proc.get("pdf_id", ""),
                 "page": proc.get("page", 0),
                 "document_title": metadata.get("document_title", f"Document {proc.get('pdf_id', '')}")
@@ -302,11 +305,33 @@ def generate_procedure_response(state: GraphState) -> GraphState:
             procedures_str += f"\n--- Procedure {citation_id} ---\n"
             procedures_str += proc.get("content", "")
 
+            # Add steps if available
+            if "steps" in proc and proc["steps"]:
+                procedures_str += "\n\nSteps:\n"
+                for step in proc["steps"]:
+                    step_num = step.get("step_number", 0)
+                    step_content = step.get("content", "")
+                    procedures_str += f"{step_num}. {step_content}\n"
+
+                    # Add warnings if available
+                    if "warnings" in step and step["warnings"]:
+                        procedures_str += "Warning: " + ", ".join(step["warnings"]) + "\n"
+
         # Format parameters for the prompt
         parameters_str = ""
-
         for i, param in enumerate(parameters):
-            parameters_str += f"\n- Parameter: {param.get('content', '')}"
+            param_name = param.get("name", "")
+            param_value = param.get("value", "")
+            param_desc = param.get("description", "")
+            param_type = param.get("type", "")
+
+            parameters_str += f"\n- Parameter: {param_name}"
+            if param_value:
+                parameters_str += f" = {param_value}"
+            if param_type:
+                parameters_str += f" (Type: {param_type})"
+            if param_desc and param_desc != f"{param_name} with value {param_value}":
+                parameters_str += f"\n  Description: {param_desc}"
 
         if not parameters_str:
             parameters_str = "No specific parameter information available."
@@ -422,7 +447,7 @@ def format_retrieved_content(elements: List[Dict[str, Any]]) -> tuple:
 
         # Get document info
         pdf_id = element.get("pdf_id", "")
-        page = element.get("page", 0)
+        page = metadata.get("page", 0) or element.get("page", 0)
         document_title = metadata.get("document_title", f"Document {pdf_id}")
 
         # Add citation info
@@ -440,6 +465,9 @@ def format_retrieved_content(elements: List[Dict[str, Any]]) -> tuple:
         section_info = ""
         if "section" in metadata and metadata["section"]:
             section_info = f", Section: {metadata['section']}"
+        elif "section_headers" in metadata and metadata["section_headers"]:
+            if isinstance(metadata["section_headers"], list) and metadata["section_headers"]:
+                section_info = f", Section: {' > '.join(metadata['section_headers'])}"
 
         # Format the content with citation marker and enhanced information
         content_str += f"\n--- Content {citation_id} (Type: {content_type}{section_info}, "
@@ -457,26 +485,47 @@ def format_retrieved_content(elements: List[Dict[str, Any]]) -> tuple:
 
     return content_str, citation_map
 
-def get_document_titles(elements: List[Dict[str, Any]]) -> Dict[str, str]:
+def format_document_information(state: GraphState) -> str:
     """
-    Extract document titles from retrieved elements.
+    Format document information for research mode.
 
     Args:
-        elements: Retrieved elements
+        state: Graph state with document information
 
     Returns:
-        Dictionary mapping PDF IDs to document titles
+        Formatted document information string
     """
-    document_titles = {}
+    info_str = "Documents included in this analysis:\n"
 
-    for element in elements:
-        pdf_id = element.get("pdf_id", "")
-        metadata = element.get("metadata", {})
+    # Try to get document titles from research state
+    if state.research_state and state.research_state.metadata and "document_meta" in state.research_state.metadata:
+        document_meta = state.research_state.metadata["document_meta"]
 
-        if pdf_id and pdf_id not in document_titles:
-            document_titles[pdf_id] = metadata.get("document_title", f"Document {pdf_id}")
+        # Handle different metadata formats
+        if isinstance(document_meta, dict):
+            for pdf_id, info in document_meta.items():
+                if isinstance(info, dict) and "title" in info:
+                    info_str += f"- Document ID: {pdf_id}, Title: {info['title']}\n"
+                elif isinstance(info, str):
+                    info_str += f"- Document ID: {pdf_id}, Title: {info}\n"
+                else:
+                    info_str += f"- Document ID: {pdf_id}\n"
 
-    return document_titles
+    # Fallback to PDF IDs if no titles available
+    elif state.query_state and state.query_state.pdf_ids:
+        for pdf_id in state.query_state.pdf_ids:
+            info_str += f"- Document ID: {pdf_id}\n"
+
+    # Fallback to retrieval state metadata
+    elif state.retrieval_state and state.retrieval_state.metadata and "cross_document_info" in state.retrieval_state.metadata:
+        cross_doc_info = state.retrieval_state.metadata["cross_document_info"]
+
+        if "document_titles" in cross_doc_info:
+            doc_titles = cross_doc_info["document_titles"]
+            for pdf_id, title in doc_titles.items():
+                info_str += f"- Document ID: {pdf_id}, Title: {title}\n"
+
+    return info_str
 
 def format_knowledge_synthesis(research_context: Any) -> str:
     """
@@ -504,6 +553,26 @@ def format_knowledge_synthesis(research_context: Any) -> str:
         for insight in research_context.insights[:3]:  # Limit to key insights
             synthesis_str += f"- {insight}\n"
 
+    if not synthesis_str:
+        # Try direct dictionary access if attributes not available
+        if hasattr(research_context, "__getitem__"):
+            try:
+                if "summary" in research_context:
+                    synthesis_str += f"Summary: {research_context['summary']}\n\n"
+
+                if "facts" in research_context and research_context["facts"]:
+                    synthesis_str += "Key Facts:\n"
+                    for fact in research_context["facts"][:5]:
+                        synthesis_str += f"- {fact}\n"
+                    synthesis_str += "\n"
+
+                if "insights" in research_context and research_context["insights"]:
+                    synthesis_str += "Insights:\n"
+                    for insight in research_context["insights"][:3]:
+                        synthesis_str += f"- {insight}\n"
+            except:
+                pass
+
     return synthesis_str
 
 def format_research_insights(research_state: Any) -> str:
@@ -522,14 +591,29 @@ def format_research_insights(research_state: Any) -> str:
         insights_str += "Cross-Document Insights:\n"
         for insight in research_state.insights:
             insights_str += f"- {insight}\n"
+        insights_str += "\n"
 
     if hasattr(research_state, "cross_references") and research_state.cross_references:
-        insights_str += "\nCommon Concepts Across Documents:\n"
+        insights_str += "Common Concepts Across Documents:\n"
         for i, concept in enumerate(research_state.cross_references[:5]):
             if isinstance(concept, dict) and "name" in concept:
-                insights_str += f"- {concept['name']}\n"
+                doc_count = concept.get("document_count", 0)
+                docs = concept.get("documents", [])
+                insights_str += f"- {concept['name']} (appears in {doc_count} documents: {', '.join(docs[:3])})\n"
             else:
                 insights_str += f"- {concept}\n"
+
+    # Try to access metadata if no attributes found
+    if not insights_str and hasattr(research_state, "metadata"):
+        meta = research_state.metadata
+        if "cross_document_info" in meta and "shared_concepts" in meta["cross_document_info"]:
+            shared_concepts = meta["cross_document_info"]["shared_concepts"]
+            insights_str += "Common Concepts Across Documents:\n"
+            for concept in shared_concepts[:5]:
+                if isinstance(concept, dict) and "name" in concept:
+                    insights_str += f"- {concept['name']}\n"
+                else:
+                    insights_str += f"- {concept}\n"
 
     return insights_str
 
@@ -557,7 +641,7 @@ def extract_citations(response_text: str, citation_map: Dict[str, Any]) -> List[
         if citation_id in citation_map:
             citation_data = citation_map[citation_id].copy()
 
-            # Check if already added
+            # Check if already added (avoid duplicates)
             if not any(c.get("id") == citation_data.get("id") for c in citations):
                 citations.append(citation_data)
 
