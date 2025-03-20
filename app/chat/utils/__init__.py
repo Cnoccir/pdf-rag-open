@@ -72,24 +72,32 @@ from .async_helpers import (
     gather_with_concurrency
 )
 
+
 def validate_content_element_class():
     """
     Validate that the ContentElement class has the expected structure.
     This helps identify attribute mismatches before they cause runtime errors.
     """
-    from app.chat.types import ContentElement, ContentType
+    from app.chat.types import ContentElement, ContentType, ContentMetadata
     import logging
 
     logger = logging.getLogger(__name__)
 
     try:
+        # Create proper metadata with pdf_id set
+        metadata = ContentMetadata(
+            pdf_id="test_pdf",
+            page_number=1,
+            content_type=ContentType.TEXT
+        )
+
         # Create a test instance
         test_element = ContentElement(
             element_id="test",
             content="Test content",
             content_type=ContentType.TEXT,
             pdf_id="test_pdf",
-            metadata={}
+            metadata=metadata  # Use properly initialized metadata
         )
 
         # Check required attributes
@@ -102,6 +110,11 @@ def validate_content_element_class():
                 logger.error(f"ContentElement class missing required attribute: {attr}")
                 return False
 
+        # Verify metadata.pdf_id is set
+        if not hasattr(test_element.metadata, 'pdf_id') or not test_element.metadata.pdf_id:
+            logger.error("ContentElement.metadata.pdf_id is not set")
+            return False
+
         # Verify content_type is an enum or has expected structure
         if hasattr(test_element.content_type, 'value'):
             logger.info(f"content_type has value attribute: {test_element.content_type.value}")
@@ -112,5 +125,5 @@ def validate_content_element_class():
         return True
 
     except Exception as e:
-        logger.error(f"Error validating ContentElement class: {str(e)}")
+        logger.error(f"Error validating ContentElement class: {str(e)}", exc_info=True)
         return False

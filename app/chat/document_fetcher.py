@@ -727,6 +727,10 @@ class DocumentProcessor:
         metadata: ContentMetadata
     ) -> ContentElement:
         """Create a content element with specified properties."""
+        # Ensure metadata has pdf_id set
+        if not hasattr(metadata, 'pdf_id') or not metadata.pdf_id:
+            metadata.pdf_id = self.pdf_id
+
         return ContentElement(
             element_id=element_id,
             content=content,
@@ -1334,7 +1338,7 @@ class DocumentProcessor:
         try:
             # 1. Set enhanced configuration for concept extraction
             MIN_CONCEPT_OCCURRENCES = 1  # Capture ALL technical terms, even rare ones
-            MIN_RELATIONSHIP_CONFIDENCE = 0.6  # Balanced value for relationships
+            MIN_RELATIONSHIP_CONFIDENCE = 0.5  # LOWERED from 0.6 to catch more relationships
             MAX_CONCEPTS = self.config.max_concepts_per_document
 
             # 2. Extract concepts with improved domain awareness
@@ -1429,8 +1433,14 @@ class DocumentProcessor:
             relationships = extract_document_relationships(
                 text=full_text,
                 technical_terms=list(top_concept_terms),
-                min_confidence=MIN_RELATIONSHIP_CONFIDENCE
+                min_confidence=MIN_RELATIONSHIP_CONFIDENCE  # Using lower threshold
             )
+
+            # Log the number of relationships found with the lower threshold
+            if relationships:
+                logger.info(f"Found {len(relationships)} relationships with confidence threshold {MIN_RELATIONSHIP_CONFIDENCE}")
+            else:
+                logger.info(f"No relationships found even with lower confidence threshold {MIN_RELATIONSHIP_CONFIDENCE}")
 
             # 8. Add extracted relationships to the concept network
             for rel in relationships:
@@ -1452,16 +1462,7 @@ class DocumentProcessor:
 
             # 11. Register with research manager for reuse
             if self.research_manager:
-                self.research_manager.register_concept_network(self.pdf_id, self.concept_network)
-
-                # Also register primary concepts for cross-document analysis
-                if self.concept_network.primary_concepts:
-                    for concept in self.concept_network.primary_concepts:
-                        self.research_manager.register_shared_concept(
-                            concept=concept,
-                            pdf_ids={self.pdf_id},
-                            confidence=0.95  # High confidence for primary concepts
-                        )
+                self._handle_research_manager_integration(self.concept_network)
 
             logger.info(
                 f"Built optimized concept network with {len(concept_objects)} concepts "
@@ -1472,6 +1473,42 @@ class DocumentProcessor:
             logger.error(f"Concept network building failed: {e}", exc_info=True)
             # Don't fail completely, create an empty network
             self.concept_network = ConceptNetwork()
+
+    def _handle_research_manager_integration(self, document_title, metadata):
+        """Handle integration with research manager with robust error handling."""
+        if not self.research_manager:
+            return
+
+        try:
+            # Add document information - try multiple method signatures for compatibility
+            if hasattr(self.research_manager, 'add_document_metadata'):
+                self.research_manager.add_document_metadata(self.pdf_id, metadata)
+            elif hasattr(self.research_manager, 'add_document'):
+                # Map to expected parameters
+                self.research_manager.add_document(
+                    pdf_id=self.pdf_id,
+                    title=document_title,
+                    primary_concepts=self.concept_network.primary_concepts if self.concept_network else [],
+                    summary=metadata.get('description', '')
+                )
+
+            # Register concept network if present
+            if self.concept_network and hasattr(self.research_manager, 'register_concept_network'):
+                self.research_manager.register_concept_network(self.pdf_id, self.concept_network)
+
+            # Register primary concepts for cross-document analysis
+            if self.concept_network and self.concept_network.primary_concepts:
+                for concept in self.concept_network.primary_concepts:
+                    if hasattr(self.research_manager, 'register_shared_concept'):
+                        self.research_manager.register_shared_concept(
+                            concept=concept,
+                            pdf_ids={self.pdf_id},
+                            confidence=0.95
+                        )
+
+        except Exception as e:
+            logger.warning(f"Research manager integration error: {str(e)}")
+
 
     def _add_concepts_to_section(self, section_path: str, concepts: List[str]) -> None:
         """Add concepts to a section in the concept network."""
