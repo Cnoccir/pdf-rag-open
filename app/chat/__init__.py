@@ -39,6 +39,8 @@ from app.chat.types import (
 # Chat manager for orchestrating the LangGraph workflow
 from app.chat.chat_manager import ChatManager
 
+from app.chat.research.research_manager import EnhancedResearchManager, ResearchContex
+
 # Document processor for PDF processing
 from app.chat.document_fetcher import process_technical_document
 
@@ -173,6 +175,10 @@ __all__ = [
     "get_mongo_store",
     "get_qdrant_store",
     "UnifiedVectorStore",
+
+    "EnhancedResearchManager",
+    "ResearchManager",
+    "ResearchContex",
 
     # Memory Management
     "MemoryManager"
