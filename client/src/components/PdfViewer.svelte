@@ -1581,10 +1581,6 @@
     gap: 12px;
   }
 
-  .error-icon {
-    color: #dc2626;
-  }
-
   .error-message p {
     color: #b91c1c;
     font-size: 16px;

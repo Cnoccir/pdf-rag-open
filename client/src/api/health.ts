@@ -1,6 +1,11 @@
 // src/api/health.ts
 
-import { axios } from './axios';
+import axios from 'axios'; // Import directly from axios package
+
+// Create a dedicated axios instance for health API
+const healthApi = axios.create({
+  baseURL: '/api'
+});
 
 /**
  * Service for interacting with the health monitoring API
@@ -10,35 +15,35 @@ export const health = {
    * Get system health information
    */
   getSystemHealth: async () => {
-    return axios.get('/health/system');
+    return healthApi.get('/health/system');
   },
 
   /**
    * Get database health information
    */
   getDatabaseHealth: async () => {
-    return axios.get('/health/databases');
+    return healthApi.get('/health/databases');
   },
 
   /**
    * Get vector store health information
    */
   getVectorStoreHealth: async () => {
-    return axios.get('/health/vector_stores');
+    return healthApi.get('/health/vector_stores');
   },
 
   /**
    * Get memory health information
    */
   getMemoryHealth: async () => {
-    return axios.get('/health/memory');
+    return healthApi.get('/health/memory');
   },
 
   /**
    * Get system-wide metrics
    */
   getMetrics: async () => {
-    return axios.get('/health/metrics');
+    return healthApi.get('/health/metrics');
   },
 
   /**
@@ -48,7 +53,7 @@ export const health = {
     if (!pdfId) {
       throw new Error('PDF ID is required');
     }
-    return axios.get(`/health/pdf/${pdfId}`);
+    return healthApi.get(`/health/pdf/${pdfId}`);
   },
 
   /**
@@ -61,7 +66,7 @@ export const health = {
     if (!pdfId) {
       throw new Error('PDF ID is required');
     }
-    return axios.post('/health/query_test', {
+    return healthApi.post('/health/query_test', {
       query,
       pdf_id: pdfId,
       k
@@ -72,13 +77,13 @@ export const health = {
    * Force reinitialization of vector stores
    */
   reinitializeVectorStores: async () => {
-    return axios.get('/health/databases?force_init=true');
+    return healthApi.get('/health/databases?force_init=true');
   },
 
   /**
    * Run a comprehensive system diagnostic
    */
   runDiagnostic: async () => {
-    return axios.get('/health/diagnostic');
+    return healthApi.get('/health/diagnostic');
   }
 };

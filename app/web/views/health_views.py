@@ -15,7 +15,7 @@ from app.web.db import db
 from app.chat.vector_stores import get_vector_store, get_mongo_store, get_qdrant_store
 from app.web.async_wrapper import async_handler
 from app.chat.memories.memory_manager import MemoryManager
-from qdrant_client.http import models 
+from qdrant_client.http import models
 
 logger = logging.getLogger(__name__)
 
@@ -737,7 +737,7 @@ async def check_vector_stores():
         qdrant_store = get_qdrant_store()
         vector_store = get_vector_store()
 
-        # Check health asynchronously
+        # Initialize health info structure
         health_info = {
             "timestamp": datetime.utcnow().isoformat(),
             "mongo": {"status": "checking"},
@@ -745,17 +745,10 @@ async def check_vector_stores():
             "unified": {"status": "checking"}
         }
 
-        # Use ThreadPoolExecutor for parallel health checks
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            # Submit tasks
-            mongo_future = executor.submit(async_check_mongo_health, mongo_store)
-            qdrant_future = executor.submit(async_check_qdrant_health, qdrant_store)
-            unified_future = executor.submit(async_check_unified_health, vector_store)
-
-            # Get results
-            health_info["mongo"] = mongo_future.result()
-            health_info["qdrant"] = qdrant_future.result()
-            health_info["unified"] = unified_future.result()
+        # Call the health check functions directly with await
+        health_info["mongo"] = await async_check_mongo_health(mongo_store)
+        health_info["qdrant"] = await async_check_qdrant_health(qdrant_store)
+        health_info["unified"] = await async_check_unified_health(vector_store)
 
         # Determine overall status
         if (health_info["mongo"]["status"] == "ok" and
@@ -780,133 +773,280 @@ async def check_vector_stores():
         }), 500
 
 async def async_check_mongo_health(mongo_store):
-    """Check MongoDB health asynchronously."""
+    """Check MongoDB health asynchronously with improved error handling."""
     try:
-        if not mongo_store._initialized:
-            return {
-                "status": "error",
-                "error": "MongoDB not initialized",
-                "initialized": False
-            }
-
-        # Check connection
-        if not mongo_store.client:
-            return {
-                "status": "error",
-                "error": "MongoDB client not available",
-                "initialized": True
-            }
-
-        # Check if we can ping
-        mongo_store.client.admin.command('ping')
-
-        # Get collection stats
-        collection_stats = {}
-        for collection_name in ["documents", "content_elements", "concepts", "relationships"]:
-            collection = getattr(mongo_store.db, collection_name)
-            collection_stats[collection_name] = collection.count_documents({})
-
-        return {
-            "status": "ok",
-            "initialized": True,
-            "collections": collection_stats,
-            "database": mongo_store.db_name
+        # Initialize health info
+        health_info = {
+            "status": "checking",
+            "initialized": False,
+            "connection": "unknown",
+            "database_ready": False,
+            "collections": {},
+            "timestamp": datetime.utcnow().isoformat()
         }
+
+        # First check if store is initialized
+        health_info["initialized"] = mongo_store._initialized if hasattr(mongo_store, "_initialized") else False
+
+        if not health_info["initialized"]:
+            health_info["status"] = "error"
+            health_info["error"] = "MongoDB store not initialized"
+            return health_info
+
+        # Check if client exists
+        if not hasattr(mongo_store, "client") or mongo_store.client is None:
+            health_info["status"] = "error"
+            health_info["error"] = "MongoDB client not available"
+            health_info["connection"] = "failed"
+            return health_info
+
+        # Use a try block for all MongoDB operations
+        try:
+            # Test connection by ping
+            mongo_store.client.admin.command('ping')
+            health_info["connection"] = "connected"
+
+            # Check db object
+            if not hasattr(mongo_store, "db") or mongo_store.db is None:
+                health_info["status"] = "error"
+                health_info["error"] = "MongoDB database object not available"
+                return health_info
+
+            # Check collections by trying to list collection names
+            try:
+                collection_names = list(mongo_store.db.list_collection_names())
+                health_info["database_ready"] = True
+                health_info["collection_names"] = collection_names
+            except Exception as coll_err:
+                health_info["status"] = "error"
+                health_info["error"] = f"Failed to list collections: {str(coll_err)}"
+                return health_info
+
+            # Try to get basic stats for each collection
+            for collection_name in ["documents", "content_elements", "concepts", "relationships"]:
+                try:
+                    if collection_name in collection_names:
+                        # Use a more reliable approach to get count that avoids boolean tests
+                        collection = getattr(mongo_store.db, collection_name)
+                        if collection is not None:
+                            count = 0
+                            # Use a try block specifically for count operation
+                            try:
+                                count = collection.count_documents({})
+                            except Exception as count_err:
+                                health_info["collections"][collection_name] = {"error": f"Count error: {str(count_err)}"}
+                                continue
+
+                            health_info["collections"][collection_name] = {"count": count}
+                    else:
+                        health_info["collections"][collection_name] = {"exists": False}
+                except Exception as coll_access_err:
+                    health_info["collections"][collection_name] = {"error": str(coll_access_err)}
+
+            # All checks passed
+            health_info["status"] = "ok"
+
+        except Exception as db_err:
+            health_info["status"] = "error"
+            health_info["error"] = f"MongoDB operation failed: {str(db_err)}"
+            health_info["connection"] = "failed"
+
+        return health_info
+
     except Exception as e:
+        # Handle any other exceptions
         return {
             "status": "error",
-            "error": str(e),
-            "initialized": mongo_store._initialized
+            "error": f"Health check failed: {str(e)}",
+            "initialized": getattr(mongo_store, "_initialized", False),
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 async def async_check_qdrant_health(qdrant_store):
-    """Check Qdrant health asynchronously."""
+    """Check Qdrant health asynchronously with improved error handling."""
     try:
-        if not qdrant_store._initialized:
-            return {
-                "status": "error",
-                "error": "Qdrant not initialized",
-                "initialized": False
-            }
-
-        # Check if client is available
-        if not qdrant_store.client:
-            return {
-                "status": "error",
-                "error": "Qdrant client not available",
-                "initialized": True
-            }
-
-        # Check collection
-        collection_info = qdrant_store.client.get_collection(qdrant_store.collection_name)
-
-        # Count vectors
-        count_result = qdrant_store.client.count(
-            collection_name=qdrant_store.collection_name,
-            count_filter=None
-        )
-
-        return {
-            "status": "ok",
-            "initialized": True,
-            "collection": qdrant_store.collection_name,
-            "vector_count": count_result.count,
-            "dimension": collection_info.config.params.vectors.size,
-            "distance": str(collection_info.config.params.vectors.distance)
+        # Initialize health info
+        health_info = {
+            "status": "checking",
+            "initialized": False,
+            "connection": "unknown",
+            "database_ready": False,
+            "timestamp": datetime.utcnow().isoformat()
         }
+
+        # Check if store is initialized
+        health_info["initialized"] = qdrant_store._initialized if hasattr(qdrant_store, "_initialized") else False
+
+        if not health_info["initialized"]:
+            health_info["status"] = "error"
+            health_info["error"] = "Qdrant store not initialized"
+            return health_info
+
+        # Check if client exists
+        if not hasattr(qdrant_store, "client") or qdrant_store.client is None:
+            health_info["status"] = "error"
+            health_info["error"] = "Qdrant client not available"
+            health_info["connection"] = "failed"
+            return health_info
+
+        # Use a try block for all Qdrant operations
+        try:
+            # Check collection info
+            try:
+                collection_info = qdrant_store.client.get_collection(
+                    collection_name=qdrant_store.collection_name
+                )
+                health_info["collection"] = qdrant_store.collection_name
+                health_info["connection"] = "connected"
+
+                # Add dimensions from collection config
+                if hasattr(collection_info, "config") and hasattr(collection_info.config, "params"):
+                    if hasattr(collection_info.config.params, "vectors"):
+                        vectors_config = collection_info.config.params.vectors
+                        if hasattr(vectors_config, "size"):
+                            health_info["dimension"] = vectors_config.size
+                        if hasattr(vectors_config, "distance"):
+                            health_info["distance"] = str(vectors_config.distance)
+
+            except Exception as coll_error:
+                health_info["status"] = "error"
+                health_info["error"] = f"Failed to get collection info: {str(coll_error)}"
+                return health_info
+
+            # Count vectors
+            try:
+                count_result = qdrant_store.client.count(
+                    collection_name=qdrant_store.collection_name,
+                    count_filter=None
+                )
+
+                # Safely extract count
+                if hasattr(count_result, "count"):
+                    health_info["vector_count"] = count_result.count
+
+                health_info["database_ready"] = True
+
+            except Exception as count_error:
+                health_info["status"] = "error"
+                health_info["error"] = f"Failed to count vectors: {str(count_error)}"
+                return health_info
+
+            # All checks passed
+            health_info["status"] = "ok"
+
+        except Exception as qdrant_err:
+            health_info["status"] = "error"
+            health_info["error"] = f"Qdrant operation failed: {str(qdrant_err)}"
+            health_info["connection"] = "failed"
+
+        return health_info
+
     except Exception as e:
+        # Handle any other exceptions
         return {
             "status": "error",
-            "error": str(e),
-            "initialized": qdrant_store._initialized
+            "error": f"Health check failed: {str(e)}",
+            "initialized": getattr(qdrant_store, "_initialized", False),
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 async def async_check_unified_health(vector_store):
-    """Check unified vector store health asynchronously."""
+    """Check unified vector store health asynchronously with improved error handling."""
     try:
-        if not vector_store._initialized:
-            return {
-                "status": "error",
-                "error": "Unified vector store not initialized",
-                "initialized": False
-            }
-
-        # Check component stores
-        mongo_initialized = vector_store.mongo_store._initialized if hasattr(vector_store, 'mongo_store') else False
-        qdrant_initialized = vector_store.qdrant_store._initialized if hasattr(vector_store, 'qdrant_store') else False
-
-        # Use internal check_health method
-        health = await vector_store.check_health()
-
-        health_data = {
-            "status": health.get("status", "error"),
-            "initialized": vector_store._initialized,
+        # Initialize health info
+        health_info = {
+            "status": "checking",
+            "initialized": False,
             "components": {
-                "mongo_ready": mongo_initialized,
-                "qdrant_ready": qdrant_initialized
+                "mongo_ready": False,
+                "qdrant_ready": False
             },
-            "embedding_model": vector_store.embedding_model,
-            "embedding_dimension": vector_store.embedding_dimension
+            "timestamp": datetime.utcnow().isoformat()
         }
 
-        # Add more details if available
-        if "mongo_status" in health:
-            health_data["mongo_details"] = health["mongo_status"]
+        # Check if store is initialized
+        health_info["initialized"] = vector_store._initialized if hasattr(vector_store, "_initialized") else False
 
-        if "qdrant_status" in health:
-            health_data["qdrant_details"] = health["qdrant_status"]
+        if not health_info["initialized"]:
+            health_info["status"] = "error"
+            health_info["error"] = "Unified vector store not initialized"
+            return health_info
 
-        # Get metrics
-        health_data["metrics"] = vector_store.metrics
+        # Check components safely
+        try:
+            # Check MongoDB component
+            if (hasattr(vector_store, 'mongo_store') and
+                vector_store.mongo_store is not None and
+                hasattr(vector_store.mongo_store, '_initialized')):
 
-        return health_data
+                mongo_initialized = vector_store.mongo_store._initialized
+                health_info["components"]["mongo_ready"] = mongo_initialized
+
+                # Try to get additional info if initialized
+                if mongo_initialized:
+                    try:
+                        if (hasattr(vector_store.mongo_store, 'db_name') and
+                            vector_store.mongo_store.db_name is not None):
+                            health_info["mongo_details"] = {
+                                "database": vector_store.mongo_store.db_name
+                            }
+                    except Exception:
+                        pass
+
+            # Check Qdrant component
+            if (hasattr(vector_store, 'qdrant_store') and
+                vector_store.qdrant_store is not None and
+                hasattr(vector_store.qdrant_store, '_initialized')):
+
+                qdrant_initialized = vector_store.qdrant_store._initialized
+                health_info["components"]["qdrant_ready"] = qdrant_initialized
+
+                # Try to get additional info if initialized
+                if qdrant_initialized:
+                    try:
+                        if (hasattr(vector_store.qdrant_store, 'collection_name') and
+                            vector_store.qdrant_store.collection_name is not None):
+                            health_info["qdrant_details"] = {
+                                "collection": vector_store.qdrant_store.collection_name
+                            }
+                    except Exception:
+                        pass
+
+            # Get embedding model info
+            if hasattr(vector_store, 'embedding_model'):
+                health_info["embedding_model"] = vector_store.embedding_model
+
+            if hasattr(vector_store, 'embedding_dimension'):
+                health_info["embedding_dimension"] = vector_store.embedding_dimension
+
+            # Get metrics if available
+            if hasattr(vector_store, 'metrics'):
+                health_info["metrics"] = vector_store.metrics
+
+            # Determine overall status
+            if health_info["components"]["mongo_ready"] and health_info["components"]["qdrant_ready"]:
+                health_info["status"] = "ok"
+            elif health_info["components"]["mongo_ready"] or health_info["components"]["qdrant_ready"]:
+                health_info["status"] = "degraded"
+            else:
+                health_info["status"] = "error"
+                health_info["error"] = "No vector store components are ready"
+
+        except Exception as comp_err:
+            health_info["status"] = "error"
+            health_info["error"] = f"Component check failed: {str(comp_err)}"
+
+        return health_info
+
     except Exception as e:
+        # Handle any other exceptions
         return {
             "status": "error",
-            "error": str(e),
-            "initialized": vector_store._initialized
+            "error": f"Health check failed: {str(e)}",
+            "initialized": getattr(vector_store, "_initialized", False),
+            "timestamp": datetime.utcnow().isoformat()
         }
-
+        
 @bp.route("/memory", methods=["GET"])
 @login_required
 def check_memory_manager():

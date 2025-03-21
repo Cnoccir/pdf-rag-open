@@ -181,41 +181,105 @@ class UnifiedVectorStore:
         # Forward to MongoDB store
         return self.mongo_store.add_section_concept_relation(section, concept, pdf_id)
 
-    def add_procedure(
-        self,
-        procedure: Dict[str, Any],
-        pdf_id: str
-    ) -> bool:
-        """Add a procedure to MongoDB."""
+# Fix in UnifiedVectorStore methods that interact with MongoDB
+
+def add_procedure(self, procedure: Dict[str, Any], pdf_id: str) -> bool:
+    """Add a procedure to MongoDB."""
+    try:
+        # Create procedure document
+        procedure_doc = {
+            "procedure_id": procedure.get("procedure_id", f"proc_{pdf_id}_{uuid.uuid4().hex[:8]}"),
+            "pdf_id": pdf_id,
+            "title": procedure.get("title", "Untitled Procedure"),
+            "content": procedure.get("content", ""),
+            "page": procedure.get("page", 0),
+            "steps": procedure.get("steps", []),
+            "parameters": procedure.get("parameters", []),
+            "section_headers": procedure.get("section_headers", []),
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        }
+
+        # Check if mongo_store exists, has db attribute, and db is not None
+        if not hasattr(self, "mongo_store"):
+            logger.error("mongo_store attribute not found")
+            return False
+
+        if self.mongo_store is None:
+            logger.error("mongo_store is None")
+            return False
+
+        if not hasattr(self.mongo_store, "db"):
+            logger.error("mongo_store.db attribute not found")
+            return False
+
+        if self.mongo_store.db is None:
+            logger.error("mongo_store.db is None")
+            return False
+
+        if not hasattr(self.mongo_store.db, "procedures"):
+            logger.error("procedures collection not found in database")
+            return False
+
+        # Now we can safely access the procedures collection
+        result = self.mongo_store.db.procedures.update_one(
+            {"procedure_id": procedure_doc["procedure_id"]},
+            {"$set": procedure_doc},
+            upsert=True
+        )
+        return result.acknowledged
+    except Exception as e:
+        logger.error(f"Error adding procedure: {str(e)}")
+        return False
+
+    def add_parameter(self, parameter: Dict[str, Any], pdf_id: str) -> bool:
+        """Add a parameter to MongoDB."""
         try:
-            # Create procedure document
-            procedure_doc = {
-                "procedure_id": procedure.get("procedure_id", f"proc_{pdf_id}_{uuid.uuid4().hex[:8]}"),
+            # Create parameter document
+            parameter_doc = {
+                "parameter_id": parameter.get("parameter_id", f"param_{pdf_id}_{uuid.uuid4().hex[:8]}"),
                 "pdf_id": pdf_id,
-                "title": procedure.get("title", "Untitled Procedure"),
-                "content": procedure.get("content", ""),
-                "page": procedure.get("page", 0),
-                "steps": procedure.get("steps", []),
-                "parameters": procedure.get("parameters", []),
-                "section_headers": procedure.get("section_headers", []),
+                "name": parameter.get("name", ""),
+                "value": parameter.get("value", ""),
+                "type": parameter.get("type", ""),
+                "description": parameter.get("description", ""),
+                "procedure_id": parameter.get("procedure_id", None),
+                "section_headers": parameter.get("section_headers", []),
+                "page": parameter.get("page", 0),
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow()
             }
 
-            # Fix: Use explicit None comparison
-            if (hasattr(self.mongo_store, "db") and
-                self.mongo_store.db is not None and
-                hasattr(self.mongo_store.db, "procedures")):
+            # Check if mongo_store exists, has db attribute, and db is not None
+            if not hasattr(self, "mongo_store"):
+                logger.error("mongo_store attribute not found")
+                return False
 
-                result = self.mongo_store.db.procedures.update_one(
-                    {"procedure_id": procedure_doc["procedure_id"]},
-                    {"$set": procedure_doc},
-                    upsert=True
-                )
-                return result.acknowledged
-            return False
+            if self.mongo_store is None:
+                logger.error("mongo_store is None")
+                return False
+
+            if not hasattr(self.mongo_store, "db"):
+                logger.error("mongo_store.db attribute not found")
+                return False
+
+            if self.mongo_store.db is None:
+                logger.error("mongo_store.db is None")
+                return False
+
+            if not hasattr(self.mongo_store.db, "parameters"):
+                logger.error("parameters collection not found in database")
+                return False
+
+            # Now we can safely access the parameters collection
+            result = self.mongo_store.db.parameters.update_one(
+                {"parameter_id": parameter_doc["parameter_id"]},
+                {"$set": parameter_doc},
+                upsert=True
+            )
+            return result.acknowledged
         except Exception as e:
-            logger.error(f"Error adding procedure: {str(e)}")
+            logger.error(f"Error adding parameter: {str(e)}")
             return False
 
     def add_parameter(
@@ -712,8 +776,11 @@ class UnifiedVectorStore:
         except Exception as e:
             logger.error(f"Error closing connections: {str(e)}")
 
-    async def check_health(self) -> Dict[str, Any]:
-        """Check health of both MongoDB and Qdrant."""
+    def check_health(self) -> Dict[str, Any]:
+        """
+        Synchronous version of health check for compatibility.
+        Returns health status information for the unified store.
+        """
         health_info = {
             "status": "error",
             "mongo_ready": False,
@@ -726,24 +793,75 @@ class UnifiedVectorStore:
             return health_info
 
         try:
-            # Check MongoDB health
-            mongo_health = await self.mongo_store.check_health()
-            health_info["mongo_ready"] = mongo_health.get("database_ready", False)
-            health_info["mongo_status"] = mongo_health
+            # Check MongoDB connection
+            mongo_ready = False
+            if hasattr(self, 'mongo_store') and self.mongo_store is not None:
+                if hasattr(self.mongo_store, 'client') and self.mongo_store.client is not None:
+                    try:
+                        # Test ping
+                        self.mongo_store.client.admin.command('ping')
+                        mongo_ready = True
 
-            # Check Qdrant health
-            qdrant_health = await self.qdrant_store.check_health()
-            health_info["qdrant_ready"] = qdrant_health.get("database_ready", False)
-            health_info["qdrant_status"] = qdrant_health
+                        # Basic stats
+                        health_info["mongo_status"] = {
+                            "connected": True,
+                            "database": self.mongo_store.db_name if hasattr(self.mongo_store, 'db_name') else "unknown"
+                        }
+                    except Exception as mongo_error:
+                        health_info["mongo_status"] = {
+                            "connected": False,
+                            "error": str(mongo_error)
+                        }
+                else:
+                    health_info["mongo_status"] = {
+                        "connected": False,
+                        "error": "MongoDB client not initialized"
+                    }
 
-            # Determine overall status
-            if health_info["mongo_ready"] and health_info["qdrant_ready"]:
+            # Check Qdrant connection
+            qdrant_ready = False
+            if hasattr(self, 'qdrant_store') and self.qdrant_store is not None:
+                if hasattr(self.qdrant_store, 'client') and self.qdrant_store.client is not None:
+                    try:
+                        # Get collection info
+                        collection_info = self.qdrant_store.client.get_collection(
+                            collection_name=self.qdrant_store.collection_name
+                        )
+                        qdrant_ready = True
+
+                        # Basic stats
+                        health_info["qdrant_status"] = {
+                            "connected": True,
+                            "collection": self.qdrant_store.collection_name,
+                            "vectors_config": str(collection_info.config.params.vectors) if hasattr(collection_info, 'config') else "unknown"
+                        }
+                    except Exception as qdrant_error:
+                        health_info["qdrant_status"] = {
+                            "connected": False,
+                            "error": str(qdrant_error)
+                        }
+                else:
+                    health_info["qdrant_status"] = {
+                        "connected": False,
+                        "error": "Qdrant client not initialized"
+                    }
+
+            # Update status values
+            health_info["mongo_ready"] = mongo_ready
+            health_info["qdrant_ready"] = qdrant_ready
+
+            # Overall status
+            if mongo_ready and qdrant_ready:
                 health_info["status"] = "ok"
-            else:
+            elif mongo_ready or qdrant_ready:
                 health_info["status"] = "degraded"
+            else:
+                health_info["status"] = "error"
+
+            # Add metrics
+            health_info["metrics"] = self.metrics
 
             return health_info
-
         except Exception as e:
             health_info["error"] = str(e)
             return health_info

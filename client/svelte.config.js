@@ -18,7 +18,7 @@ const config = {
 		alias: {
 			$c: 'src/components',
 			$s: 'src/store',
-			$api: 'src/api/axios.js'
+			$api: 'src/api'
 		}
 	}
 };

@@ -63,7 +63,7 @@ export async function triggerEmbeddingProcess(pdfId: string): Promise<void> {
 
 export const deletePdf = async (pdfId: string) => {
   try {
-    const response = await axiosInstance.delete(`/pdfs/${pdfId}/delete`);
+    const response = await api.delete(`/pdfs/${pdfId}/delete`);
     return response.data;
   } catch (error) {
     console.error('Error deleting PDF:', error);
@@ -139,5 +139,3 @@ export async function deactivateResearchMode(conversationId: string): Promise<vo
         throw new Error(errorMessage);
     }
 }
-// Export the health API
-export { health };

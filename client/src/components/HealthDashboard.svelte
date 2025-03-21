@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { api, health } from '$api';  
+  import { api } from '$api';
+  import { health } from '../api/health';  // Direct import from health.ts
   import Icon from '$c/Icon.svelte';
 
   // State variables

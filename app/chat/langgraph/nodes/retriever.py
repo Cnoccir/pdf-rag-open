@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Any, List, Optional, Set
 from datetime import datetime
 
+from langchain_core.documents import Document
 from app.chat.langgraph.state import GraphState, RetrievalStrategy, ContentType, RetrievalState
 from app.chat.types import ChunkLevel, EmbeddingType
 from app.chat.vector_stores import get_vector_store

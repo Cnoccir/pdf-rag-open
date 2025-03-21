@@ -69,36 +69,28 @@ class MongoStore:
             return True
 
         try:
-            # Create client with options
             self.client = MongoClient(
                 self.uri,
-                serverSelectionTimeoutMS=5000,  # 5 second timeout
+                serverSelectionTimeoutMS=5000,
                 connectTimeoutMS=5000,
                 socketTimeoutMS=10000,
                 maxPoolSize=100,
                 retryWrites=True
             )
 
-            # Test connection
-            self.client.admin.command('ping')
+            self.client.admin.command('ping')  # Verify connection
 
-            # Get database
             self.db = self.client[self.db_name]
 
-            # Create collections if they don't exist
-            if "documents" not in self.db.list_collection_names():
-                self.db.create_collection("documents")
+            # Ensure collections exist
+            existing_collections = self.db.list_collection_names()
+            collections_to_check = ["documents", "content_elements", "concepts", "relationships"]
+            for collection_name in collections_to_check:
+                if collection_name not in existing_collections:
+                    self.db.create_collection(collection_name)
+                    logger.info(f"Created collection: {collection_name}")
 
-            if "content_elements" not in self.db.list_collection_names():
-                self.db.create_collection("content_elements")
-
-            if "concepts" not in self.db.list_collection_names():
-                self.db.create_collection("concepts")
-
-            if "relationships" not in self.db.list_collection_names():
-                self.db.create_collection("relationships")
-
-            # Create indexes
+            # Index creation
 
             # Document indexes
             self.db.documents.create_index([("pdf_id", ASCENDING)], unique=True)
@@ -135,13 +127,13 @@ class MongoStore:
             self.error = str(e)
             logger.error(f"Failed to initialize MongoDB: {str(e)}")
 
-            # Clean up failed connection
-            if self.client:
+            if self.client is not None:
                 self.client.close()
                 self.client = None
 
             self._initialized = False
             return False
+
 
     def create_document_node(
         self,

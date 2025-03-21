@@ -61,16 +61,38 @@ def initialize_and_verify_stores(max_retries: int = 3, retry_delay: int = 5) -> 
                 results["success"] = True
                 logger.info("All vector stores initialized successfully")
 
-                # Log collection statistics
+                # Log collection statistics - safer approach
                 try:
-                    mongo_stats = mongo_store.get_stats()
-                    logger.info(f"MongoDB collections: {mongo_stats.get('collection_counts', {})}")
+                    # Only use safe checks for MongoDB
+                    if (mongo_store is not None and
+                        hasattr(mongo_store, "db") and
+                        mongo_store.db is not None):
 
-                    # Log a sample of document IDs
-                    if mongo_store.db and hasattr(mongo_store.db, "documents"):
-                        sample_docs = list(mongo_store.db.documents.find({}, {"pdf_id": 1, "title": 1}).limit(5))
-                        if sample_docs:
-                            logger.info(f"Sample documents: {sample_docs}")
+                        # Get collection stats safely
+                        collection_counts = {}
+                        for collection_name in ["documents", "content_elements", "concepts", "relationships"]:
+                            try:
+                                if hasattr(mongo_store.db, collection_name):
+                                    collection = getattr(mongo_store.db, collection_name)
+                                    count = collection.count_documents({})
+                                    collection_counts[collection_name] = count
+                            except Exception as coll_err:
+                                logger.warning(f"Error counting collection {collection_name}: {str(coll_err)}")
+
+                        logger.info(f"MongoDB collections: {collection_counts}")
+
+                        # Get sample document IDs safely
+                        try:
+                            if hasattr(mongo_store.db, "documents"):
+                                sample_docs = []
+                                cursor = mongo_store.db.documents.find({}, {"pdf_id": 1, "title": 1}).limit(5)
+                                for doc in cursor:
+                                    sample_docs.append(doc)
+                                if sample_docs:
+                                    logger.info(f"Sample documents: {sample_docs}")
+                        except Exception as sample_err:
+                            logger.warning(f"Error getting sample documents: {str(sample_err)}")
+
                 except Exception as stats_error:
                     logger.warning(f"Error getting MongoDB stats: {str(stats_error)}")
 
