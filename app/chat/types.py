@@ -383,3 +383,27 @@ class ResearchContext(BaseModel):
             self.active_pdf_ids.remove(pdf_id)
             if pdf_id in self.document_titles:
                 del self.document_titles[pdf_id]
+
+# -----------------------
+# Forward Reference for ResearchManager to Avoid Circular Imports
+# -----------------------
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    class ResearchManager:
+        """Type hint for the research manager"""
+        primary_pdf_id: Optional[str] = None
+        context: ResearchContext
+
+        def __init__(self, chat_args=None, primary_pdf_id=None):
+            ...
+
+        def add_document(self, pdf_id, title=None, author=None, document_type=None, summary=None):
+            ...
+
+        def to_dict(self) -> Dict[str, Any]:
+            ...
+
+        @classmethod
+        def from_dict(cls, data, chat_args):
+            ...

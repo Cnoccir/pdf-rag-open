@@ -33,13 +33,24 @@ from app.chat.types import (
     ProcessingResult,
 
     # Chat Management Models
-    ChatArgs
+    ChatArgs,
+
+    # Research Context
+    ResearchContext
+)
+
+# Import models
+from app.chat.models import (
+    TechnicalMetadata,
+    ConceptMetadata,
+    Metadata
 )
 
 # Chat manager for orchestrating the LangGraph workflow
 from app.chat.chat_manager import ChatManager
 
-from app.chat.research.research_manager import EnhancedResearchManager, ResearchContex
+# Import research manager (moving this import here after all type definitions)
+from app.chat.research.research_manager import ResearchManager
 
 # Document processor for PDF processing
 from app.chat.document_fetcher import process_technical_document
@@ -121,26 +132,20 @@ __all__ = [
     "ConceptRelationship",
     "ConceptNetwork",
 
-    # Image Models
-    "ImageFeatures",
-    "ImageAnalysis",
-    "ImagePaths",
-    "ImageMetadata",
-
-    # Table Models
-    "TableData",
-
-    # Core Models
+    # Models from types
     "ContentElement",
     "ContentMetadata",
+    "ChunkMetadata",
+    "DocumentChunk",
+
+    # Models from models
+    "TechnicalMetadata",
+    "ConceptMetadata",
+    "Metadata",
 
     # Research Models
     "ResearchManager",
     "ResearchContext",
-
-    # Search Models
-    "SearchQuery",
-    "SearchResult",
 
     # Processing Models
     "ProcessingResult",
@@ -175,10 +180,6 @@ __all__ = [
     "get_mongo_store",
     "get_qdrant_store",
     "UnifiedVectorStore",
-
-    "EnhancedResearchManager",
-    "ResearchManager",
-    "ResearchContex",
 
     # Memory Management
     "MemoryManager"

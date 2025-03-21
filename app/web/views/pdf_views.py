@@ -7,9 +7,9 @@ from app.web.db.models import Pdf, Conversation
 from app.web.tasks.embeddings import process_document
 from app.web import files
 from app.web.db import db
-from app.chat.types import ProcessingConfig, ResearchManager
-# Update import to use the new location
-from app.chat.vector_stores import TechDocVectorStore, get_vector_store
+from app.chat.types import ProcessingConfig
+from app.chat.research.research_manager import ResearchManager
+from app.chat.vector_stores import get_vector_store
 import uuid
 import asyncio
 from datetime import datetime

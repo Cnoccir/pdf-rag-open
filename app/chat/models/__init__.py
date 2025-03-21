@@ -8,16 +8,17 @@ from app.chat.types import (
     ResearchMode,
     ProcessingConfig,
     ContentType,
-    ConceptNetwork,
-    ResearchManager
+    ConceptNetwork
 )
 
 # Type checking imports to avoid circular imports
 if TYPE_CHECKING:
     from app.chat.chains.retrieval import RetrievalManager
+    from app.chat.research.research_manager import ResearchManager
 else:
     # Runtime aliasing
     RetrievalManager = Any
+    # For runtime we'll import later when needed
 
 class ConceptMetadata(BaseModel):
     concepts: List[str] = Field(default_factory=list)
@@ -53,7 +54,7 @@ class ChatArgs(BaseModel):
 
     research_mode: ResearchMode = ResearchMode.SINGLE
     research_context: Optional[ResearchContext] = None
-    research_manager: Optional[ResearchManager] = None
+    research_manager: Optional[Any] = None  # Using Any for type here to avoid import
     retrieval_manager: Optional[Any] = None
 
     technical_context: TechnicalMetadata = Field(default_factory=TechnicalMetadata)
@@ -79,6 +80,8 @@ class ChatArgs(BaseModel):
     @validator('research_manager', pre=True, always=True)
     def ensure_research_manager(cls, v, values):
         if v is None and 'pdf_id' in values:
+            # Import here to avoid circular imports
+            from app.chat.research.research_manager import ResearchManager
             pdf_id = str(values['pdf_id'])
             return ResearchManager(primary_pdf_id=pdf_id)
         return v
