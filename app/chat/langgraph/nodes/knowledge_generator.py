@@ -11,7 +11,7 @@ from datetime import datetime
 from openai import OpenAI
 
 from app.chat.langgraph.state import GraphState, ResearchState
-from app.chat.types import ResearchContext
+from app.chat.models import ResearchContext
 
 logger = logging.getLogger(__name__)
 

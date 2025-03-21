@@ -10,7 +10,8 @@ from datetime import datetime
 import traceback
 from typing import Dict, Any, Optional, List
 
-from app.chat.types import ResearchMode, ChatArgs
+from app.chat.types import ResearchMode
+from app.chat.models import ChatArgs
 from app.chat.chat_manager import ChatManager
 from app.web.async_wrapper import async_handler
 from app.web.hooks import login_required

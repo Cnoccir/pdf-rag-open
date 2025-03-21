@@ -30,20 +30,7 @@ from app.chat.types import (
 
     # Processing Models
     ProcessingConfig,
-    ProcessingResult,
-
-    # Chat Management Models
-    ChatArgs,
-
-    # Research Context
-    ResearchContext
-)
-
-# Import models
-from app.chat.models import (
-    TechnicalMetadata,
-    ConceptMetadata,
-    Metadata
+    ProcessingResult
 )
 
 # Chat manager for orchestrating the LangGraph workflow
@@ -51,6 +38,8 @@ from app.chat.chat_manager import ChatManager
 
 # Import research manager (moving this import here after all type definitions)
 from app.chat.research.research_manager import ResearchManager
+
+from app.chat.models import ChatArgs, ConceptMetadata, Metadata, ResearchContext
 
 # Document processor for PDF processing
 from app.chat.document_fetcher import process_technical_document
@@ -139,7 +128,6 @@ __all__ = [
     "DocumentChunk",
 
     # Models from models
-    "TechnicalMetadata",
     "ConceptMetadata",
     "Metadata",
 

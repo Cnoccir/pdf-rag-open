@@ -9,7 +9,8 @@ from datetime import datetime
 import uuid
 import time
 
-from app.chat.types import ChatArgs, ResearchMode
+from app.chat.models import ChatArgs
+from app.chat.types import ResearchMode
 from app.chat.langgraph.state import GraphState, QueryState, MessageType, ConversationState
 from app.chat.langgraph.graph import create_query_graph, create_research_graph, create_document_graph
 from app.chat.memories.memory_manager import MemoryManager

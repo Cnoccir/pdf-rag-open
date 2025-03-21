@@ -6,7 +6,8 @@ Provides simplified interface to the LangGraph workflow.
 from typing import Dict, List, Any, Optional
 import logging
 
-from app.chat.types import ChatArgs, ResearchMode
+from app.chat.types import ResearchMode
+from app.chat.models import ChatArgs
 from app.chat.chat_manager import ChatManager
 from app.chat.memories.memory_manager import MemoryManager
 

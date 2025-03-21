@@ -1,25 +1,69 @@
+# app/chat/models/__init__.py
+
 import sys
 from pydantic import BaseModel, Field, validator
-from typing import Optional, Dict, Any, List, Set, Callable, TYPE_CHECKING
+from typing import (
+    Optional, Dict, Any, List, Set, TYPE_CHECKING
+)
 from datetime import datetime
-from langchain_openai import ChatOpenAI
+
+# If your code uses ChatOpenAI:
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    ChatOpenAI = Any  # fallback if not installed
+
+if TYPE_CHECKING:
+    from app.chat.research.research_manager import ResearchManager
+    RetrievalManager = Any
+else:
+    ResearchManager = Any
+    RetrievalManager = Any
+
+# Import enumerations and partial types from app.chat.types
 from app.chat.types import (
-    ResearchContext,
     ResearchMode,
     ProcessingConfig,
     ContentType,
     ConceptNetwork
 )
 
-# Type checking imports to avoid circular imports
-if TYPE_CHECKING:
-    from app.chat.chains.retrieval import RetrievalManager
-    from app.chat.research.research_manager import ResearchManager
-else:
-    # Runtime aliasing
-    RetrievalManager = Any
-    # For runtime we'll import later when needed
+# ---------------------------------------------------------------------
+# CANONICAL RESEARCH CONTEXT
+# ---------------------------------------------------------------------
+class ResearchContext(BaseModel):
+    """
+    Canonical Research Context for cross-document analysis.
+    Consolidates the context used in multi-document "research" mode.
+    """
+    primary_pdf_id: Optional[str] = None
+    active_pdf_ids: Set[str] = Field(default_factory=set)
+    document_titles: Dict[str, str] = Field(default_factory=dict)
+    last_updated: datetime = Field(default_factory=datetime.utcnow)
 
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Ensure that primary_pdf_id is in active_pdf_ids
+        if self.primary_pdf_id:
+            self.active_pdf_ids.add(self.primary_pdf_id)
+
+    def add_document(self, pdf_id: str, title: Optional[str] = None) -> None:
+        """Add a document to the research context."""
+        self.active_pdf_ids.add(pdf_id)
+        if title:
+            self.document_titles[pdf_id] = title
+        self.last_updated = datetime.utcnow()
+
+    def remove_document(self, pdf_id: str) -> None:
+        """Remove a document from the research context."""
+        if pdf_id != self.primary_pdf_id and pdf_id in self.active_pdf_ids:
+            self.active_pdf_ids.remove(pdf_id)
+            self.document_titles.pop(pdf_id, None)
+        self.last_updated = datetime.utcnow()
+
+# ---------------------------------------------------------------------
+# METADATA AND SUPPORT MODELS
+# ---------------------------------------------------------------------
 class ConceptMetadata(BaseModel):
     concepts: List[str] = Field(default_factory=list)
     relationships: List[Dict[str, Any]] = Field(default_factory=list)
@@ -33,30 +77,46 @@ class TechnicalMetadata(BaseModel):
     current_section: Optional[str] = None
     hierarchy: List[str] = Field(default_factory=list)
     concept_data: Optional[ConceptMetadata] = None
-
+    
 class Metadata(BaseModel):
     conversation_id: str
     user_id: str
     pdf_id: str
+
     technical_context: TechnicalMetadata = Field(default_factory=TechnicalMetadata)
     research_context: Dict[str, Any] = Field(default_factory=dict)
     concept_network: Optional[ConceptNetwork] = None
     document_names: Dict[str, str] = Field(default_factory=dict)
     last_updated: datetime = Field(default_factory=datetime.utcnow)
 
+# ---------------------------------------------------------------------
+# CANONICAL CHATARGS
+# ---------------------------------------------------------------------
 class ChatArgs(BaseModel):
-    conversation_id: str
-    pdf_id: str
-    streaming: bool = False
-    metadata: Optional[Metadata] = None
+    """
+    Unified ChatArgs definition, merging fields from both existing versions.
+    """
+    conversation_id: Optional[str] = None
+    pdf_id: Optional[str] = None
+
+    # Consolidated streaming fields
+    stream_enabled: bool = False
+    stream_chunk_size: int = 20
+
+    # If you need memory/LLM references
     memory_type: str = "sql_buffer_memory"
     llm: Optional[ChatOpenAI] = None
 
+    # Use ResearchMode enum
     research_mode: ResearchMode = ResearchMode.SINGLE
+
+    # Canonical ResearchContext
     research_context: Optional[ResearchContext] = None
-    research_manager: Optional[Any] = None  # Using Any for type here to avoid import
+    research_manager: Optional[Any] = None
     retrieval_manager: Optional[Any] = None
 
+    # Additional fields from older versions
+    metadata: Optional[Metadata] = None
     technical_context: TechnicalMetadata = Field(default_factory=TechnicalMetadata)
     processing_config: Optional[ProcessingConfig] = None
     content_filters: Dict[str, Any] = Field(default_factory=lambda: {
@@ -69,37 +129,37 @@ class ChatArgs(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    # Validators
+    # ----------------------------------
+    # Validators to auto-create context
+    # ----------------------------------
     @validator('research_context', pre=True, always=True)
     def ensure_research_context(cls, v, values):
-        if v is None and 'pdf_id' in values:
-            pdf_id = str(values['pdf_id'])
-            return ResearchContext(primary_pdf_id=pdf_id)
+        if v is None and values.get('pdf_id'):
+            return ResearchContext(primary_pdf_id=values['pdf_id'])
         return v
 
     @validator('research_manager', pre=True, always=True)
     def ensure_research_manager(cls, v, values):
-        if v is None and 'pdf_id' in values:
-            # Import here to avoid circular imports
+        if v is None and values.get('pdf_id'):
             from app.chat.research.research_manager import ResearchManager
-            pdf_id = str(values['pdf_id'])
-            return ResearchManager(primary_pdf_id=pdf_id)
+            return ResearchManager(primary_pdf_id=values['pdf_id'])
         return v
 
     @validator('metadata', pre=True, always=True)
     def ensure_metadata(cls, v, values):
-        if v is None and 'pdf_id' in values and 'conversation_id' in values:
-            pdf_id = str(values['pdf_id'])
-            conversation_id = values['conversation_id']
+        if v is None and values.get('pdf_id') and values.get('conversation_id'):
             return Metadata(
-                conversation_id=conversation_id,
+                conversation_id=str(values['conversation_id']),
                 user_id="",
-                pdf_id=pdf_id
+                pdf_id=str(values['pdf_id'])
             )
         return v
 
+    # ----------------------------------
+    # Example utility methods
+    # ----------------------------------
     def get_memory_config(self) -> Dict[str, Any]:
-        """Get memory configuration with safe metadata handling"""
+        """Get memory configuration with safe metadata handling."""
         metadata_dict = {}
         if self.metadata:
             try:
@@ -119,126 +179,28 @@ class ChatArgs(BaseModel):
             "metadata": {
                 "pdf_id": self.pdf_id,
                 "research_mode": self.research_mode.value,
-                "technical_context": self.technical_context.dict() if hasattr(self.technical_context, 'dict') else {}
+                "technical_context": (
+                    self.technical_context.dict()
+                    if hasattr(self.technical_context, 'dict') else {}
+                )
             }
         }
 
-    def with_concept_network(self, network: ConceptNetwork) -> 'ChatArgs':
-        """Add concept network to metadata with proper initialization"""
-        if not self.metadata:
-            self.metadata = Metadata(
-                conversation_id=self.conversation_id,
-                user_id="",
-                pdf_id=self.pdf_id
-            )
-        self.metadata.concept_network = network
-        return self
-
-    def get_technical_state(self) -> Dict[str, Any]:
-        """Get technical state with safe handling of attributes"""
-        result = {
-            "technical_context": {},
-            "concept_network": None,
-            "processing_config": {},
-            "last_updated": datetime.utcnow().isoformat()
-        }
-
-        # Safely add technical context
-        if hasattr(self, 'technical_context') and self.technical_context:
-            if hasattr(self.technical_context, 'dict'):
-                result["technical_context"] = self.technical_context.dict()
-
-        # Safely add concept network
-        if self.metadata and hasattr(self.metadata, 'concept_network') and self.metadata.concept_network:
-            if hasattr(self.metadata.concept_network, 'dict'):
-                result["concept_network"] = self.metadata.concept_network.dict()
-
-        # Safely add processing config
-        if self.processing_config:
-            if hasattr(self.processing_config, 'dict'):
-                result["processing_config"] = self.processing_config.dict()
-
-        return result
-
-    def get_research_summary(self) -> Dict[str, Any]:
-        """Get summary of research context for API responses with enhanced error handling"""
-        # First check metadata.research_mode
-        if hasattr(self, 'metadata') and self.metadata:
-            if hasattr(self.metadata, 'research_mode'):
-                rm = self.metadata.research_mode
-                if isinstance(rm, dict):
-                    return {
-                        "active": rm.get("active", False),
-                        "pdf_ids": rm.get("pdf_ids", [self.pdf_id]),
-                        "primary_pdf_id": self.pdf_id,
-                        "last_updated": datetime.utcnow().isoformat()
-                    }
-
-        # Fall back to research_context check
-        if not hasattr(self, 'research_context') or not self.research_context:
-            return {
-                "active": False,
-                "pdf_ids": [self.pdf_id]
-            }
-
-        # Get active PDF IDs safely
-        active_pdf_ids = []
-        if hasattr(self.research_context, 'active_pdf_ids'):
-            try:
-                # Handle both set and list formats
-                if isinstance(self.research_context.active_pdf_ids, set):
-                    active_pdf_ids = list(self.research_context.active_pdf_ids)
-                elif isinstance(self.research_context.active_pdf_ids, list):
-                    active_pdf_ids = self.research_context.active_pdf_ids
-                else:
-                    # Try to convert to list as a fallback
-                    active_pdf_ids = list(self.research_context.active_pdf_ids)
-            except Exception:
-                active_pdf_ids = [self.pdf_id]
-
-        # Get primary PDF ID safely
-        primary_pdf_id = self.pdf_id  # Default to current PDF ID
-        if hasattr(self.research_context, 'primary_pdf_id'):
-            primary_pdf_id = self.research_context.primary_pdf_id
-
-        # Get last updated timestamp safely
-        last_updated = datetime.utcnow().isoformat()
-        if hasattr(self.research_context, 'last_updated'):
-            try:
-                if isinstance(self.research_context.last_updated, datetime):
-                    last_updated = self.research_context.last_updated.isoformat()
-                elif isinstance(self.research_context.last_updated, str):
-                    last_updated = self.research_context.last_updated
-            except Exception:
-                pass  # Keep default value
-
-        return {
-            "active": self.research_mode == ResearchMode.MULTI,
-            "pdf_ids": active_pdf_ids,
-            "primary_pdf_id": primary_pdf_id,
-            "last_updated": last_updated
-        }
-
-    @property
     def is_research_active(self) -> bool:
-        """Safely check if research mode is active with proper error handling"""
-        try:
-            # First check the research_mode enum
-            if self.research_mode != ResearchMode.MULTI:
-                return False
-
-            # Then check the research context
-            if not hasattr(self, 'research_context') or self.research_context is None:
-                return False
-
-            # Check for active_pdf_ids attribute and content
-            if not hasattr(self.research_context, 'active_pdf_ids'):
-                return False
-
-            # Check the length of active PDFs
-            return len(self.research_context.active_pdf_ids) > 1
-        except Exception:
-            # Any error means research is not active
+        """
+        Checks if multi-document research is active.
+        """
+        if self.research_mode != ResearchMode.RESEARCH:
             return False
+        if not self.research_context or not self.research_context.active_pdf_ids:
+            return False
+        return len(self.research_context.active_pdf_ids) > 1
 
-__all__ = ["ChatArgs", "Metadata", "TechnicalMetadata", "ConceptMetadata"]
+
+__all__ = [
+    "ChatArgs",
+    "ResearchContext",
+    "Metadata",
+    "ConceptMetadata",
+    "TechnicalMetadata"
+]

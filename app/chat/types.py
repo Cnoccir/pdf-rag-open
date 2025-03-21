@@ -1,18 +1,20 @@
+# app/chat/types.py
+
 """
 Streamlined type definitions for the PDF RAG system.
 Optimized for MongoDB document structure and Qdrant vector storage.
 """
 
-from enum import Enum, auto
+from enum import Enum
 from typing import Dict, List, Optional, Any, Union, Set
 from datetime import datetime
 from pydantic import BaseModel, Field
+from typing import TYPE_CHECKING
 
-# -----------------------
-# Core Enums
-# -----------------------
+#
+# 1. Core Enums
+#
 class ContentType(str, Enum):
-    """Content types in documents."""
     TEXT = "text"
     TABLE = "table"
     IMAGE = "image"
@@ -20,42 +22,37 @@ class ContentType(str, Enum):
     EQUATION = "equation"
     DIAGRAM = "diagram"
     PAGE = "page"
-    PROCEDURE = "procedure"  # Added for procedure extraction
-    PARAMETER = "parameter"  # Added for parameter extraction
+    PROCEDURE = "procedure"
+    PARAMETER = "parameter"
 
 class ChunkLevel(str, Enum):
-    """Hierarchical chunk levels for multi-level chunking."""
-    DOCUMENT = "document"   # L1: Document-level (2000-4000 tokens)
-    SECTION = "section"     # L2: Section-level (1000-2000 tokens)
-    PROCEDURE = "procedure" # L3: Procedure-level (500-1000 tokens)
-    STEP = "step"           # L4: Step-level (100-300 tokens)
+    DOCUMENT = "document"
+    SECTION = "section"
+    PROCEDURE = "procedure"
+    STEP = "step"
 
 class EmbeddingType(str, Enum):
-    """Embedding types for multi-embedding strategy."""
-    CONCEPTUAL = "conceptual"      # Document-level conceptual understanding
-    TASK = "task"                  # Procedure-level task understanding
-    TECHNICAL = "technical"        # Parameter/technical details
-    GENERAL = "general"            # Default embedding type
+    CONCEPTUAL = "conceptual"
+    TASK = "task"
+    TECHNICAL = "technical"
+    GENERAL = "general"
 
 class ResearchMode(str, Enum):
-    """Research modes for the PDF RAG system."""
-    SINGLE = "single"     # Single document mode
-    RESEARCH = "research"  # Multi-document research mode
+    SINGLE = "single"
+    RESEARCH = "research"
 
 class RelationType(str, Enum):
-    """Relationship types between technical concepts."""
-    PART_OF = "part_of"           # Component is part of a larger system
-    USES = "uses"                 # One component uses/depends on another
-    IMPLEMENTS = "implements"     # Component implements an interface/abstract concept
-    EXTENDS = "extends"           # Component extends/inherits from another
-    RELATES_TO = "relates_to"     # General relationship between components
-    CONFIGURES = "configures"     # One component configures another
-    PREREQUISITE = "prerequisite" # One step/procedure requires another first
-    REFERENCES = "references"     # One document refers to another
+    PART_OF = "part_of"
+    USES = "uses"
+    IMPLEMENTS = "implements"
+    EXTENDS = "extends"
+    RELATES_TO = "relates_to"
+    CONFIGURES = "configures"
+    PREREQUISITE = "prerequisite"
+    REFERENCES = "references"
 
     @classmethod
     def map_type(cls, type_str: str) -> 'RelationType':
-        """Map a string to a RelationType."""
         mapping = {
             "part_of": cls.PART_OF,
             "uses": cls.USES,
@@ -71,81 +68,69 @@ class RelationType(str, Enum):
         }
         return mapping.get(type_str.lower(), cls.RELATES_TO)
 
-# -----------------------
-# Content Element Models
-# -----------------------
+#
+# 2. Content Models
+#
 class ContentMetadata(BaseModel):
-    """Metadata for content elements."""
     pdf_id: str
     page_number: Optional[int] = 0
     content_type: Optional[Union[ContentType, str]] = ContentType.TEXT
-    parent_element_id: Optional[str] = None  # Changed from parent_element to parent_element_id
+    parent_element_id: Optional[str] = None
     hierarchy_level: Optional[int] = 0
     section_headers: List[str] = Field(default_factory=list)
     technical_terms: List[str] = Field(default_factory=list)
-    chunk_level: Optional[ChunkLevel] = None  # Added for multi-level chunking
-    embedding_type: Optional[EmbeddingType] = EmbeddingType.GENERAL  # Added for multi-embedding
+    chunk_level: Optional[ChunkLevel] = None
+    embedding_type: Optional[EmbeddingType] = EmbeddingType.GENERAL
     confidence: float = 1.0
-    context: Optional[str] = None  # Changed from surrounding_context to context
+    context: Optional[str] = None
     image_path: Optional[str] = None
     table_data: Optional[Dict[str, Any]] = None
     image_metadata: Optional[Dict[str, Any]] = None
-    procedure_metadata: Optional[Dict[str, Any]] = None  # Added for procedure extraction
-    parameter_metadata: Optional[Dict[str, Any]] = None  # Added for parameter extraction
-    element_id: Optional[str] = None  # Added to help with MongoDB queries
-    mongo_id: Optional[str] = None  # Added to reference MongoDB _id
-    qdrant_id: Optional[str] = None  # Added to reference Qdrant point ID
+    procedure_metadata: Optional[Dict[str, Any]] = None
+    parameter_metadata: Optional[Dict[str, Any]] = None
+    element_id: Optional[str] = None
+    mongo_id: Optional[str] = None
+    qdrant_id: Optional[str] = None
     score: float = 0.0
-    doc_hash: Optional[str] = None  # Added document hash for versioning
+    doc_hash: Optional[str] = None
 
 class ContentElement(BaseModel):
-    """Content element from a document."""
     element_id: str
     content: str
     content_type: Union[ContentType, str]
     pdf_id: str
     page: Optional[int] = 0
     metadata: ContentMetadata
-    embedding: Optional[List[float]] = None  # Added to optionally store embedding
-    vector_id: Optional[str] = None  # Added to reference vector ID in Qdrant
+    embedding: Optional[List[float]] = None
+    vector_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for MongoDB storage."""
-        # Create a dictionary representation
-        element_dict = self.dict(exclude={"embedding"})  # Exclude embedding from MongoDB
-
-        # Ensure content_type is a string
+        element_dict = self.dict(exclude={"embedding"})
         element_dict["content_type"] = str(self.content_type)
-
-        # Add timestamps
         if not element_dict.get("created_at"):
             element_dict["created_at"] = datetime.utcnow()
         element_dict["updated_at"] = datetime.utcnow()
-
         return element_dict
 
     def to_qdrant_payload(self) -> Dict[str, Any]:
-        """Convert to metadata payload for Qdrant."""
-        # Create a minimal metadata payload for Qdrant
         payload = {
             "element_id": self.element_id,
             "pdf_id": self.pdf_id,
             "content_type": str(self.content_type),
-            "page_number": self.metadata.page_number if hasattr(self.metadata, "page_number") else 0,
-            "chunk_level": str(self.metadata.chunk_level) if hasattr(self.metadata, "chunk_level") and self.metadata.chunk_level else None,
-            "section": " > ".join(self.metadata.section_headers) if hasattr(self.metadata, "section_headers") and self.metadata.section_headers else None,
-            "technical_terms": self.metadata.technical_terms[:10] if hasattr(self.metadata, "technical_terms") and self.metadata.technical_terms else [],
-            "hierarchy_level": self.metadata.hierarchy_level if hasattr(self.metadata, "hierarchy_level") else 0
+            "page_number": self.metadata.page_number,
+            "chunk_level": str(self.metadata.chunk_level) if self.metadata.chunk_level else None,
+            "section": " > ".join(self.metadata.section_headers) if self.metadata.section_headers else None,
+            "technical_terms": self.metadata.technical_terms[:10],
+            "hierarchy_level": self.metadata.hierarchy_level
         }
         return payload
 
-# -----------------------
-# Chunking Models
-# -----------------------
+#
+# 3. Chunking Models
+#
 class ChunkMetadata(BaseModel):
-    """Metadata for document chunks."""
     pdf_id: str
     content_type: str
     chunk_level: ChunkLevel
@@ -155,11 +140,10 @@ class ChunkMetadata(BaseModel):
     parent_chunk_id: Optional[str] = None
     technical_terms: List[str] = Field(default_factory=list)
     embedding_type: EmbeddingType = EmbeddingType.GENERAL
-    element_ids: List[str] = Field(default_factory=list)  # IDs of elements in this chunk
+    element_ids: List[str] = Field(default_factory=list)
     token_count: int = 0
 
 class DocumentChunk(BaseModel):
-    """Document chunk for vector storage."""
     chunk_id: str
     content: str
     metadata: ChunkMetadata
@@ -168,7 +152,6 @@ class DocumentChunk(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for MongoDB storage."""
         chunk_dict = self.dict(exclude={"embedding"})
         chunk_dict["content_type"] = str(self.metadata.content_type)
         chunk_dict["chunk_level"] = str(self.metadata.chunk_level)
@@ -177,7 +160,6 @@ class DocumentChunk(BaseModel):
         return chunk_dict
 
     def to_qdrant_payload(self) -> Dict[str, Any]:
-        """Convert to metadata payload for Qdrant."""
         payload = {
             "chunk_id": self.chunk_id,
             "pdf_id": self.metadata.pdf_id,
@@ -191,11 +173,10 @@ class DocumentChunk(BaseModel):
         }
         return payload
 
-# -----------------------
-# Concept Models
-# -----------------------
+#
+# 4. Concept Models
+#
 class Concept(BaseModel):
-    """Technical concept extracted from document."""
     name: str
     occurrences: int = 1
     in_headers: bool = False
@@ -204,31 +185,27 @@ class Concept(BaseModel):
     importance_score: float = 0.5
     is_primary: bool = False
     category: Optional[str] = None
-    pdf_id: str  # Added to help with MongoDB queries
+    pdf_id: str
 
 class ConceptRelationship(BaseModel):
-    """Relationship between technical concepts."""
     source: str
     target: str
     type: RelationType = RelationType.RELATES_TO
     weight: float = 0.5
     context: str = ""
     extraction_method: str = "rule-based"
-    pdf_id: str  # Added to help with MongoDB queries
+    pdf_id: str
 
 class ConceptNetwork(BaseModel):
-    """Network of concepts and their relationships."""
     concepts: List[Concept] = Field(default_factory=list)
     relationships: List[ConceptRelationship] = Field(default_factory=list)
     section_concepts: Dict[str, List[str]] = Field(default_factory=dict)
     primary_concepts: List[str] = Field(default_factory=list)
-    pdf_id: Optional[str] = None  # Added to help with MongoDB queries
+    pdf_id: Optional[str] = None
 
     def add_concept(self, concept: Concept) -> None:
-        """Add a concept to the network."""
         for existing in self.concepts:
             if existing.name.lower() == concept.name.lower():
-                # Update existing concept
                 existing.occurrences += concept.occurrences
                 existing.importance_score = max(existing.importance_score, concept.importance_score)
                 existing.is_primary = existing.is_primary or concept.is_primary
@@ -236,18 +213,15 @@ class ConceptNetwork(BaseModel):
         self.concepts.append(concept)
 
     def add_relationship(self, relationship: ConceptRelationship) -> None:
-        """Add a relationship to the network."""
         for existing in self.relationships:
-            if (existing.source.lower() == relationship.source.lower() and
-                existing.target.lower() == relationship.target.lower() and
-                existing.type == relationship.type):
-                # Update existing relationship
+            if (existing.source.lower() == relationship.source.lower()
+                and existing.target.lower() == relationship.target.lower()
+                and existing.type == relationship.type):
                 existing.weight = max(existing.weight, relationship.weight)
                 return
         self.relationships.append(relationship)
 
     def add_section_concepts(self, section: str, concepts: List[str]) -> None:
-        """Add concepts to a section."""
         if section not in self.section_concepts:
             self.section_concepts[section] = []
         for concept in concepts:
@@ -255,15 +229,12 @@ class ConceptNetwork(BaseModel):
                 self.section_concepts[section].append(concept)
 
     def calculate_importance_scores(self) -> None:
-        """Calculate importance scores for concepts based on network properties."""
-        # Implementation remains the same
         pass
 
-# -----------------------
-# Search and Query Models
-# -----------------------
+#
+# 5. Search/Query
+#
 class SearchQuery(BaseModel):
-    """Query for searching document content."""
     query: str
     content_types: Optional[List[Union[ContentType, str]]] = None
     technical_terms: Optional[List[str]] = None
@@ -275,7 +246,6 @@ class SearchQuery(BaseModel):
     active_pdf_ids: Optional[List[str]] = None
 
 class SearchResult(BaseModel):
-    """Result from a document search."""
     content: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
     score: float = 0.0
@@ -284,12 +254,11 @@ class SearchResult(BaseModel):
     page_number: Optional[int] = None
     content_type: Optional[str] = ContentType.TEXT
     document_title: Optional[str] = None
-    
-# -----------------------
-# Processing Models
-# -----------------------
+
+#
+# 6. Processing
+#
 class ProcessingConfig(BaseModel):
-    """Configuration for document processing."""
     pdf_id: str
     chunk_size: int = 500
     chunk_overlap: int = 100
@@ -299,19 +268,17 @@ class ProcessingConfig(BaseModel):
     process_tables: bool = True
     extract_technical_terms: bool = True
     extract_relationships: bool = True
-    extract_procedures: bool = True  # Added for procedure extraction
+    extract_procedures: bool = True
     merge_list_items: bool = True
     max_concepts_per_document: int = 200
-    # Multi-level chunking configuration
     chunk_levels: Dict[ChunkLevel, int] = Field(
         default_factory=lambda: {
-            ChunkLevel.DOCUMENT: 3000,  # 3000 tokens (~2250 words)
-            ChunkLevel.SECTION: 1500,   # 1500 tokens (~1125 words)
-            ChunkLevel.PROCEDURE: 800,  # 800 tokens (~600 words)
-            ChunkLevel.STEP: 200        # 200 tokens (~150 words)
+            ChunkLevel.DOCUMENT: 3000,
+            ChunkLevel.SECTION: 1500,
+            ChunkLevel.PROCEDURE: 800,
+            ChunkLevel.STEP: 200
         }
     )
-    # Multi-embedding strategy configuration
     embedding_types: Dict[EmbeddingType, str] = Field(
         default_factory=lambda: {
             EmbeddingType.CONCEPTUAL: "text-embedding-3-small",
@@ -322,7 +289,6 @@ class ProcessingConfig(BaseModel):
     )
 
 class ProcessingResult(BaseModel):
-    """Result of document processing."""
     pdf_id: str
     elements: List[ContentElement] = Field(default_factory=list)
     chunks: List[DocumentChunk] = Field(default_factory=list)
@@ -332,16 +298,15 @@ class ProcessingResult(BaseModel):
     concept_network: Optional[ConceptNetwork] = None
     visual_elements: List[ContentElement] = Field(default_factory=list)
     document_summary: Optional[Dict[str, Any]] = None
-    procedures: List[Dict[str, Any]] = Field(default_factory=list)  # Added for procedures
-    parameters: List[Dict[str, Any]] = Field(default_factory=list)  # Added for parameters
+    procedures: List[Dict[str, Any]] = Field(default_factory=list)
+    parameters: List[Dict[str, Any]] = Field(default_factory=list)
     raw_data: Dict[str, Any] = Field(default_factory=dict)
 
     def get_statistics(self) -> Dict[str, Any]:
-        """Get statistics about the processing result."""
         element_types = {}
         for element in self.elements:
-            element_type = str(element.content_type)
-            element_types[element_type] = element_types.get(element_type, 0) + 1
+            t = str(element.content_type)
+            element_types[t] = element_types.get(t, 0) + 1
 
         top_technical_terms = {}
         for element in self.elements:
@@ -355,81 +320,15 @@ class ProcessingResult(BaseModel):
             "element_types": element_types,
             "procedure_count": len(self.procedures),
             "parameter_count": len(self.parameters),
-            "top_technical_terms": dict(sorted(top_technical_terms.items(), key=lambda x: x[1], reverse=True)[:20])
+            "top_technical_terms": dict(
+                sorted(top_technical_terms.items(), key=lambda x: x[1], reverse=True)[:20]
+            )
         }
 
 # -----------------------
-# Chat Management Models
+# NO REAL RESEARCHMANAGER HERE
+# If you must reference it in type hints:
 # -----------------------
-class ChatArgs(BaseModel):
-    """Arguments for chat initialization."""
-    conversation_id: Optional[str] = None
-    pdf_id: Optional[str] = None
-    research_mode: ResearchMode = ResearchMode.SINGLE
-    stream_enabled: bool = False
-    stream_chunk_size: int = 20
-    memory_type: str = "sql"
-    metadata: Optional[Dict[str, Any]] = None
-
-    # Additional settings for retrieval
-    chunk_level_preference: Optional[ChunkLevel] = None  # Preferred chunk level for retrieval
-    embedding_type_preference: Optional[EmbeddingType] = None  # Preferred embedding type
-
-    def __init__(self, **data):
-        super().__init__(**data)
-        # Initialize research context if not provided
-        if not hasattr(self, 'research_context') and hasattr(self, 'pdf_id') and self.pdf_id:
-            from app.chat.types import ResearchContext
-            self.research_context = ResearchContext(primary_pdf_id=self.pdf_id)
-
-# -----------------------
-# Research and Cross-Document Models
-# -----------------------
-class ResearchContext(BaseModel):
-    """Research context for cross-document analysis."""
-    primary_pdf_id: str
-    active_pdf_ids: Set[str] = Field(default_factory=set)
-    document_titles: Dict[str, str] = Field(default_factory=dict)
-
-    def __init__(self, **data):
-        super().__init__(**data)
-        # Ensure primary PDF ID is in active PDF IDs
-        if self.primary_pdf_id:
-            self.active_pdf_ids.add(self.primary_pdf_id)
-
-    def add_document(self, pdf_id: str, title: Optional[str] = None) -> None:
-        """Add a document to research."""
-        self.active_pdf_ids.add(pdf_id)
-        if title:
-            self.document_titles[pdf_id] = title
-
-    def remove_document(self, pdf_id: str) -> None:
-        """Remove a document from research."""
-        if pdf_id != self.primary_pdf_id and pdf_id in self.active_pdf_ids:
-            self.active_pdf_ids.remove(pdf_id)
-            if pdf_id in self.document_titles:
-                del self.document_titles[pdf_id]
-
-# -----------------------
-# Forward Reference for ResearchManager to Avoid Circular Imports
-# -----------------------
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
-    class ResearchManager:
-        """Type hint for the research manager"""
-        primary_pdf_id: Optional[str] = None
-        context: ResearchContext
-
-        def __init__(self, chat_args=None, primary_pdf_id=None):
-            ...
-
-        def add_document(self, pdf_id, title=None, author=None, document_type=None, summary=None):
-            ...
-
-        def to_dict(self) -> Dict[str, Any]:
-            ...
-
-        @classmethod
-        def from_dict(cls, data, chat_args):
-            ...
+    from app.chat.research.research_manager import ResearchManager
+    from app.chat.models import ChatArgs, ResearchContext
