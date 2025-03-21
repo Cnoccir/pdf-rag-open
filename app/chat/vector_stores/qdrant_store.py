@@ -177,6 +177,8 @@ class QdrantStore:
 
             # Prepare points for batched insertion
             points = []
+            original_to_uuid_map = {}  # Map to track original IDs to UUID conversions
+
             for i, (text, embedding, metadata, element_id) in enumerate(zip(texts, embeddings, metadatas, element_ids)):
                 # Clean metadata for Qdrant
                 clean_metadata = {k: v for k, v in metadata.items() if v is not None}
@@ -187,9 +189,30 @@ class QdrantStore:
                 if "element_id" not in clean_metadata:
                     clean_metadata["element_id"] = element_id
 
-                # Create point
+                # Store original ID for reference and retrieval
+                clean_metadata["original_id"] = element_id
+
+                # Convert element_id to UUID format accepted by Qdrant
+                try:
+                    # Try using it as-is if it's already a UUID
+                    try:
+                        # This will raise ValueError if not a valid UUID
+                        uuid_obj = uuid.UUID(str(element_id))
+                        uuid_id = str(uuid_obj)
+                    except ValueError:
+                        # Create a deterministic UUID from the string ID
+                        uuid_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(element_id)))
+
+                    # Keep track of the mapping
+                    original_to_uuid_map[element_id] = uuid_id
+                except Exception:
+                    # Fallback to random UUID if all else fails
+                    uuid_id = str(uuid.uuid4())
+                    original_to_uuid_map[element_id] = uuid_id
+
+                # Create point with UUID as ID
                 point = models.PointStruct(
-                    id=element_id,
+                    id=uuid_id,  # Use UUID format for Qdrant
                     vector=embedding,
                     payload=clean_metadata
                 )
@@ -197,15 +220,25 @@ class QdrantStore:
                 points.append(point)
 
             # Insert in batches
+            successful_ids = []
             for i in range(0, len(points), batch_size):
                 batch = points[i:i+batch_size]
-                self.client.upsert(
-                    collection_name=self.collection_name,
-                    points=batch
-                )
+                try:
+                    self.client.upsert(
+                        collection_name=self.collection_name,
+                        points=batch
+                    )
+                    # Track successful insertions using original IDs
+                    for point in batch:
+                        original_id = point.payload.get("original_id")
+                        if original_id:
+                            successful_ids.append(original_id)
+                except Exception as batch_error:
+                    logger.error(f"Error in batch {i//batch_size}: {str(batch_error)}")
+                    # Continue with next batch
 
-            logger.info(f"Added {len(texts)} texts to Qdrant")
-            return element_ids
+            logger.info(f"Added {len(successful_ids)}/{len(texts)} texts to Qdrant")
+            return successful_ids
 
         except Exception as e:
             logger.error(f"Error adding texts to Qdrant: {str(e)}")
@@ -337,6 +370,10 @@ class QdrantStore:
 
                 # Add score to metadata
                 metadata["score"] = point.score
+
+                # Use original_id if available for consistency
+                if "original_id" in metadata:
+                    metadata["element_id"] = metadata["original_id"]
 
                 # Create document
                 doc = Document(

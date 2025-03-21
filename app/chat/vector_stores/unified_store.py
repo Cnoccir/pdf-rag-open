@@ -202,8 +202,11 @@ class UnifiedVectorStore:
                 "updated_at": datetime.utcnow()
             }
 
-            # Add to MongoDB
-            if hasattr(self.mongo_store, "db") and self.mongo_store.db:
+            # Fix: Use explicit None comparison
+            if (hasattr(self.mongo_store, "db") and
+                self.mongo_store.db is not None and
+                hasattr(self.mongo_store.db, "procedures")):
+
                 result = self.mongo_store.db.procedures.update_one(
                     {"procedure_id": procedure_doc["procedure_id"]},
                     {"$set": procedure_doc},
@@ -237,8 +240,11 @@ class UnifiedVectorStore:
                 "updated_at": datetime.utcnow()
             }
 
-            # Add to MongoDB
-            if hasattr(self.mongo_store, "db") and self.mongo_store.db:
+            # Fix: Use explicit None comparison
+            if (hasattr(self.mongo_store, "db") and
+                self.mongo_store.db is not None and
+                hasattr(self.mongo_store.db, "parameters")):
+
                 result = self.mongo_store.db.parameters.update_one(
                     {"parameter_id": parameter_doc["parameter_id"]},
                     {"$set": parameter_doc},

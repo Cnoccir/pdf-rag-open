@@ -65,7 +65,7 @@ class MongoStore:
         Initialize the MongoDB connection and collections.
         Returns: Success status
         """
-        if self._initialized and self.client and self.db:
+        if self._initialized and self.client is not None and self.db is not None:
             return True
 
         try:
