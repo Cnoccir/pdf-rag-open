@@ -306,7 +306,8 @@ class QdrantStore:
         self,
         query: str,
         k: int = 10,
-        filter_dict: Optional[Dict[str, Any]] = None
+        filter_dict: Optional[Dict[str, Any]] = None,
+        **kwargs
     ) -> List[Document]:
         """
         Perform similarity search using vector embeddings.
@@ -315,6 +316,7 @@ class QdrantStore:
             query: Query text
             k: Number of results to return
             filter_dict: Optional filter dictionary
+            **kwargs: Additional arguments
 
         Returns:
             List of document results
@@ -335,17 +337,20 @@ class QdrantStore:
                 conditions = []
                 for key, value in filter_dict.items():
                     if isinstance(value, list):
+                        # For list values, use MatchAny for OR logic
+                        string_values = [str(v) for v in value]  # Convert all values to strings
                         conditions.append(
                             models.FieldCondition(
                                 key=key,
-                                match=models.MatchAny(any=value)
+                                match=models.MatchAny(any=string_values)
                             )
                         )
                     else:
+                        # For single values, use MatchValue
                         conditions.append(
                             models.FieldCondition(
                                 key=key,
-                                match=models.MatchValue(value=value)
+                                match=models.MatchValue(value=str(value))  # Convert value to string
                             )
                         )
 
@@ -353,6 +358,9 @@ class QdrantStore:
                     filter_condition = models.Filter(
                         must=conditions
                     )
+
+            # Log the actual filter being sent to Qdrant
+            logger.debug(f"Qdrant search filter: {filter_condition}")
 
             # Execute search
             search_result = self.client.search(
@@ -375,9 +383,14 @@ class QdrantStore:
                 if "original_id" in metadata:
                     metadata["element_id"] = metadata["original_id"]
 
+                # Ensure content is available
+                content = metadata.pop("content", "")
+                if not content and "content" in point.payload:
+                    content = point.payload["content"]
+
                 # Create document
                 doc = Document(
-                    page_content=metadata.get("content", ""),
+                    page_content=content,
                     metadata=metadata
                 )
 
@@ -393,7 +406,7 @@ class QdrantStore:
             return documents
 
         except Exception as e:
-            logger.error(f"Error in similarity search: {str(e)}")
+            logger.error(f"Error in similarity search: {str(e)}", exc_info=True)
             self.metrics["errors"] += 1
             return []
 
@@ -539,7 +552,7 @@ class QdrantStore:
         except Exception as e:
             logger.error(f"Error getting counts by filter: {str(e)}")
             return {"total": 0, "error": str(e)}
-            
+
 # Singleton instance getter
 def get_qdrant_store() -> QdrantStore:
     """Get or create Qdrant store instance"""

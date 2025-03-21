@@ -19,6 +19,8 @@ from app.web.views import (
     stream_views,
     health_views,
 )
+# Import enhanced RAG monitor
+from app.monitoring.rag_monitor import RAGMonitor
 # Import the async wrapper
 from app.web.async_wrapper import async_handler, run_async
 import os
@@ -58,108 +60,61 @@ except Exception as e:
 
 migrate = Migrate()
 
-class RAGMonitor:
-    """
-    Custom monitoring solution for RAG operations.
-    Stores metrics in MongoDB for visualization and analysis.
-    """
-
-    def __init__(self, mongo_client=None):
-        self.mongo_client = mongo_client
-        self.db_name = os.getenv("MONITORING_DB_NAME", "rag_monitoring")
-        self.collection_name = "metrics"
-        self._initialized = False
-        self._init_db()
-
-    def _init_db(self):
-        if not self.mongo_client:
-            from pymongo import MongoClient
-            mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")
-            self.mongo_client = MongoClient(mongo_uri)
-
-        self.db = self.mongo_client[self.db_name]
-        self.metrics = self.db[self.collection_name]
-
-        # Create indexes
-        self.metrics.create_index("timestamp")
-        self.metrics.create_index("operation")
-        self.metrics.create_index("pdf_id")
-
-        self._initialized = True
-
-    def record_operation(self, operation, details=None, pdf_id=None, duration_ms=None):
-        """Record an operation for monitoring."""
-        if not self._initialized:
-            self._init_db()
-
-        metric = {
-            "timestamp": datetime.utcnow(),
-            "operation": operation,
-            "pdf_id": pdf_id,
-            "duration_ms": duration_ms,
-            "details": details or {}
-        }
-
-        self.metrics.insert_one(metric)
-
-    def record_query(self, query, pdf_ids, results_count, duration_ms, strategy):
-        """Record a query operation."""
-        details = {
-            "query": query,
-            "pdf_ids": pdf_ids,
-            "results_count": results_count,
-            "strategy": strategy
-        }
-
-        self.record_operation(
-            operation="query",
-            details=details,
-            pdf_id=pdf_ids[0] if pdf_ids else None,
-            duration_ms=duration_ms
-        )
-
-    def record_processing(self, pdf_id, element_count, chunk_count, duration_ms):
-        """Record document processing."""
-        details = {
-            "element_count": element_count,
-            "chunk_count": chunk_count
-        }
-
-        self.record_operation(
-            operation="processing",
-            details=details,
-            pdf_id=pdf_id,
-            duration_ms=duration_ms
-        )
-
-    def get_recent_operations(self, limit=100):
-        """Get recent operations for dashboard."""
-        return list(self.metrics.find().sort("timestamp", -1).limit(limit))
-
-    def get_pdf_metrics(self, pdf_id):
-        """Get metrics for a specific PDF."""
-        return list(self.metrics.find({"pdf_id": pdf_id}).sort("timestamp", -1))
-
 def initialize_vector_stores(app):
     """Initialize MongoDB and Qdrant connections with enhanced monitoring."""
     from app.chat.vector_stores import get_mongo_store, get_qdrant_store, get_vector_store
 
-    # Import vector store enhancements
-    # This will add new methods to the vector store classes
-    from app.chat.vector_stores.enhanced_monitoring import enhance_vector_stores
+    # First try to use our enhanced initialization
+    try:
+        # Initialize vector stores with enhanced initialization
+        from app.chat.vector_stores.initialization import initialize_and_verify_stores
 
-    app.logger.info("Initializing MongoDB connection...")
+        app.logger.info("Initializing vector stores with enhanced monitoring...")
+        init_results = initialize_and_verify_stores(max_retries=2, retry_delay=3)
+
+        if init_results["success"]:
+            app.logger.info("Vector stores initialized successfully")
+        else:
+            app.logger.warning("Vector store initialization incomplete:")
+            for error in init_results.get("errors", []):
+                app.logger.warning(f"- {error}")
+
+    except ImportError:
+        # Fall back to basic initialization if enhanced module isn't available
+        app.logger.info("Enhanced initialization not available, using basic initialization...")
+        app.logger.info("Initializing MongoDB connection...")
+        mongo_store = get_mongo_store()
+
+        app.logger.info("Initializing Qdrant vector store...")
+        qdrant_store = get_qdrant_store()
+
+        app.logger.info("Initializing unified vector store...")
+        vector_store = get_vector_store()
+
+    # For backwards compatibility, try to apply existing enhancements
+    try:
+        from app.chat.vector_stores.enhanced_monitoring import enhance_vector_stores
+        enhance_vector_stores()
+        app.logger.info("Applied existing vector store enhancements")
+    except ImportError:
+        app.logger.info("No additional vector store enhancements found")
+    except Exception as e:
+        app.logger.warning(f"Error applying vector store enhancements: {str(e)}")
+
+    # Also try to apply our new enhancements if available
+    try:
+        from app.chat.vector_stores.initialization import enhance_vector_stores as new_enhance
+        new_enhance()
+        app.logger.info("Applied new vector store enhancements")
+    except ImportError:
+        pass
+    except Exception as e:
+        app.logger.warning(f"Error applying new vector store enhancements: {str(e)}")
+
+    # Make sure stores are defined for app config
     mongo_store = get_mongo_store()
-
-    app.logger.info("Initializing Qdrant vector store...")
     qdrant_store = get_qdrant_store()
-
-    app.logger.info("Initializing unified vector store...")
     vector_store = get_vector_store()
-
-    # Apply enhancements to vector stores
-    enhance_vector_stores()
-    app.logger.info("Applied monitoring enhancements to vector stores")
 
     # Set stores in app config for access in views
     app.config['MONGO_STORE'] = mongo_store
@@ -194,6 +149,9 @@ def create_app():
     app.url_map.strict_slashes = False
     app.config.from_object(Config)
 
+    # Add version for diagnostics
+    app.version = "1.0.0"  # Update with your actual version
+
     # Log configuration status
     app.logger.info("MongoDB and Qdrant vector store configuration loaded")
     app.logger.info(f"Using MongoDB at: {os.getenv('MONGODB_URI')}")
@@ -211,9 +169,9 @@ def create_app():
     # Initialize vector stores with monitoring
     initialize_vector_stores(app)
 
-    # Initialize monitoring
+    # Initialize enhanced monitoring
     app.config['RAG_MONITOR'] = RAGMonitor()
-    app.logger.info("RAG monitoring initialized")
+    app.logger.info("Enhanced RAG monitoring initialized")
 
     if Config.CELERY["broker_url"]:
         celery_init_app(app)
@@ -260,7 +218,10 @@ def register_blueprints(app):
     app.register_blueprint(pdf_views.bp)
     app.register_blueprint(conversation_views.bp)
     app.register_blueprint(client_views.bp)
+
+    # Register health views with enhanced monitoring
     app.register_blueprint(health_views.bp)
+    app.logger.info("Health monitoring endpoints registered")
 
     # Stream views are no longer needed as we handle streaming in conversation_views
     # But keep it registered for backward compatibility

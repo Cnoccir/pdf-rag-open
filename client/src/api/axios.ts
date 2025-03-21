@@ -139,3 +139,5 @@ export async function deactivateResearchMode(conversationId: string): Promise<vo
         throw new Error(errorMessage);
     }
 }
+// Export the health API
+export { health };

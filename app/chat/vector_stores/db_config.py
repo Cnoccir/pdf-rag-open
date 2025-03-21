@@ -24,11 +24,6 @@ class DatabaseConfig:
     QDRANT_PORT = int(os.environ.get("QDRANT_PORT", "6333"))
     QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "content_vectors")
 
-    # Legacy Neo4j Settings (for migration)
-    NEO4J_URL = os.environ.get("NEO4J_URL", "bolt://localhost:7687")
-    NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
-    NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "password")
-
     # Embedding Settings
     EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
     EMBEDDING_DIMENSION = int(os.environ.get("EMBEDDING_DIMENSION", "1536"))

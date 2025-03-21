@@ -1,903 +1,1098 @@
-"""
-Enhanced health monitoring for the application.
-Provides comprehensive monitoring for databases, vector stores, and conversation history.
-"""
+# app/web/views/health_views.py
 
-from flask import Blueprint, jsonify, current_app, request
+from flask import Blueprint, g, request, jsonify, Response, current_app
 import logging
-import os
-import platform
-import sys
-import traceback
-from datetime import datetime, timedelta
-import psutil
-from typing import Dict, Any, List, Optional
 import json
 import time
+import traceback
+from datetime import datetime
+import concurrent.futures
+from typing import Dict, Any, List, Optional
 
-from app.chat.vector_stores import get_vector_store, get_mongo_store, get_qdrant_store
+from app.web.hooks import login_required
+from app.web.db.models import Pdf, User, Conversation
 from app.web.db import db
+from app.chat.vector_stores import get_vector_store, get_mongo_store, get_qdrant_store
 from app.web.async_wrapper import async_handler
-from app.chat.utils.pdf_status import check_pdf_status, get_recent_pdfs
 from app.chat.memories.memory_manager import MemoryManager
+from qdrant_client.http import models 
 
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("health", __name__, url_prefix="/api/health")
 
 @bp.route("/", methods=["GET"])
-def health_check():
-    """Basic health check endpoint."""
-    return jsonify({
-        "status": "ok",
-        "timestamp": datetime.utcnow().isoformat(),
-        "app_name": "PDF-RAG-App",
-        "version": "1.0.0"
-    })
+def check_health():
+    """Basic health check for system status."""
+    try:
+        # Simple status check
+        status = {
+            "status": "ok",
+            "time": datetime.utcnow().isoformat(),
+            "message": "PDF RAG system is running"
+        }
+
+        # Add app version if available
+        if hasattr(current_app, 'version'):
+            status["version"] = current_app.version
+
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"Health check error: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "time": datetime.utcnow().isoformat(),
+            "error": str(e)
+        }), 500
 
 @bp.route("/system", methods=["GET"])
-def system_info():
-    """Get detailed system information."""
-    memory = psutil.virtual_memory()
-
-    # Get CPU metrics
-    cpu_percent = psutil.cpu_percent(interval=0.5)
-    cpu_times = psutil.cpu_times_percent(interval=0.5)
-
-    # Get disk metrics for all mounts
-    disk_info = {}
-    for partition in psutil.disk_partitions(all=False):
-        try:
-            usage = psutil.disk_usage(partition.mountpoint)
-            disk_info[partition.mountpoint] = {
-                "total": usage.total,
-                "used": usage.used,
-                "free": usage.free,
-                "percent": usage.percent,
-                "filesystem": partition.fstype
-            }
-        except (PermissionError, FileNotFoundError):
-            # Some mounts might not be accessible
-            pass
-
-    # Get network metrics
-    net_io = psutil.net_io_counters()
-
-    return jsonify({
-        "os": {
-            "platform": platform.platform(),
-            "system": platform.system(),
-            "release": platform.release(),
-            "version": platform.version()
-        },
-        "python": {
-            "version": sys.version,
-            "implementation": platform.python_implementation(),
-            "path": sys.executable
-        },
-        "cpu": {
-            "count_physical": psutil.cpu_count(logical=False),
-            "count_logical": psutil.cpu_count(logical=True),
-            "percent": cpu_percent,
-            "user": cpu_times.user,
-            "system": cpu_times.system,
-            "idle": cpu_times.idle
-        },
-        "memory": {
-            "total": memory.total,
-            "available": memory.available,
-            "used": memory.used,
-            "free": memory.free,
-            "percent": memory.percent,
-            "human_total": f"{memory.total / (1024**3):.2f} GB",
-            "human_available": f"{memory.available / (1024**3):.2f} GB"
-        },
-        "disk": disk_info,
-        "network": {
-            "bytes_sent": net_io.bytes_sent,
-            "bytes_recv": net_io.bytes_recv,
-            "packets_sent": net_io.packets_sent,
-            "packets_recv": net_io.packets_recv,
-            "human_sent": f"{net_io.bytes_sent / (1024**2):.2f} MB",
-            "human_recv": f"{net_io.bytes_recv / (1024**2):.2f} MB"
-        },
-        "timestamp": datetime.utcnow().isoformat()
-    })
-
-@bp.route("/database", methods=["GET"])
-def database_health():
-    """Check database health with enhanced metrics."""
+@login_required
+def check_system():
+    """Comprehensive system health check."""
     try:
-        # Run a simple query to check database connection
-        result = db.session.execute(db.text("SELECT 1")).fetchone()
-        db_status = "ok" if result[0] == 1 else "error"
-
-        # Get table counts with additional metrics
-        table_metrics = {}
-        for table_name in ["user", "pdf", "conversation", "message"]:
-            try:
-                # Get count
-                count = db.session.execute(
-                    db.text(f"SELECT COUNT(*) FROM {table_name}")
-                ).scalar()
-
-                # Get additional metrics based on table type
-                metrics = {"count": count}
-
-                if table_name == "pdf":
-                    # Get processed vs unprocessed counts
-                    processed = db.session.execute(
-                        db.text(f"SELECT COUNT(*) FROM {table_name} WHERE processed = True")
-                    ).scalar()
-
-                    metrics.update({
-                        "processed": processed,
-                        "unprocessed": count - processed,
-                        "processing_rate": f"{(processed / max(1, count)) * 100:.2f}%"
-                    })
-
-                elif table_name == "conversation":
-                    # Get active vs deleted counts
-                    deleted = db.session.execute(
-                        db.text(f"SELECT COUNT(*) FROM {table_name} WHERE is_deleted = True")
-                    ).scalar()
-
-                    metrics.update({
-                        "active": count - deleted,
-                        "deleted": deleted
-                    })
-
-                elif table_name == "message":
-                    # Get counts by role
-                    for role in ["user", "assistant", "system"]:
-                        role_count = db.session.execute(
-                            db.text(f"SELECT COUNT(*) FROM {table_name} WHERE role = '{role}'")
-                        ).scalar()
-                        metrics[f"{role}_count"] = role_count
-
-                table_metrics[table_name] = metrics
-
-            except Exception as e:
-                table_metrics[table_name] = {"error": str(e)}
-
-        # Get database size if possible
-        db_size = None
-        try:
-            # This works for PostgreSQL
-            if "postgresql" in current_app.config.get("SQLALCHEMY_DATABASE_URI", ""):
-                size_query = """
-                SELECT pg_size_pretty(pg_database_size(current_database())) as size,
-                       pg_database_size(current_database()) as bytes
-                """
-                size_result = db.session.execute(db.text(size_query)).fetchone()
-                db_size = {
-                    "pretty": size_result[0],
-                    "bytes": size_result[1]
-                }
-        except Exception:
-            pass
-
-        return jsonify({
-            "status": db_status,
-            "type": current_app.config.get("SQLALCHEMY_DATABASE_URI", "").split("://")[0],
-            "tables": table_metrics,
-            "size": db_size,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-    except Exception as e:
-        logger.error(f"Database health check failed: {str(e)}")
-        return jsonify({
-            "status": "error",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }), 500
-
-@bp.route("/vector-store", methods=["GET"])
-@async_handler
-async def vector_store_health():
-    """
-    Check vector store health with detailed metrics for MongoDB and Qdrant.
-    Provides insights into embedding counts, database sizes, and performance.
-    """
-    try:
-        # Initialize results dictionary
-        result = {
+        health_data = {
             "status": "checking",
-            "unified_status": None,
-            "mongodb_status": None,
-            "qdrant_status": None,
-            "stats": {},
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
+            "components": {}
         }
 
-        # Get the vector stores
-        unified_store = get_vector_store()
-        mongo_store = get_mongo_store()
-        qdrant_store = get_qdrant_store()
+        # Check database connections
+        db_status = check_databases()
+        health_data["components"]["databases"] = db_status
 
-        # Check unified store health
+        # Check memory manager
         try:
-            start_time = time.time()
-            unified_health = await unified_store.check_health()
-            response_time = time.time() - start_time
+            memory_manager = MemoryManager()
+            memory_stats = memory_manager.get_stats()
+            health_data["components"]["memory_manager"] = {
+                "status": "ok",
+                "conversation_count": memory_stats.get("conversation_count", 0),
+                "message_counts": memory_stats.get("message_counts", {"total": 0})
+            }
+        except Exception as memory_error:
+            logger.error(f"Memory manager check failed: {str(memory_error)}")
+            health_data["components"]["memory_manager"] = {
+                "status": "error",
+                "error": str(memory_error)
+            }
 
-            result["unified_status"] = unified_health.get("status")
-            result["unified_response_time"] = f"{response_time:.3f}s"
-
-            # Include vector count if available
-            if "qdrant_status" in unified_health and "vector_count" in unified_health["qdrant_status"]:
-                result["stats"]["vector_count"] = unified_health["qdrant_status"]["vector_count"]
-        except Exception as e:
-            result["unified_error"] = str(e)
-
-        # Check MongoDB health
+        # Check RAG Monitor if available
         try:
-            start_time = time.time()
-            mongo_health = await mongo_store.check_health()
-            response_time = time.time() - start_time
-
-            result["mongodb_status"] = mongo_health.get("status")
-            result["mongodb_response_time"] = f"{response_time:.3f}s"
-            result["mongodb_details"] = mongo_health
-
-            # Include MongoDB stats
-            if "stats" in mongo_health:
-                result["stats"]["mongodb"] = mongo_health["stats"]
-        except Exception as e:
-            result["mongodb_error"] = str(e)
-
-        # Check Qdrant health
-        try:
-            start_time = time.time()
-            qdrant_health = await qdrant_store.check_health()
-            response_time = time.time() - start_time
-
-            result["qdrant_status"] = qdrant_health.get("status")
-            result["qdrant_response_time"] = f"{response_time:.3f}s"
-            result["qdrant_details"] = qdrant_health
-
-            # Include Qdrant stats
-            if "vector_count" in qdrant_health:
-                result["stats"]["qdrant"] = {
-                    "vector_count": qdrant_health["vector_count"],
-                    "dimension": qdrant_health.get("dimension"),
+            if hasattr(current_app, 'config') and 'RAG_MONITOR' in current_app.config:
+                monitor = current_app.config['RAG_MONITOR']
+                recent_ops = monitor.get_recent_operations(10)
+                health_data["components"]["rag_monitor"] = {
+                    "status": "ok",
+                    "recent_operations": len(recent_ops)
                 }
-        except Exception as e:
-            result["qdrant_error"] = str(e)
+            else:
+                health_data["components"]["rag_monitor"] = {
+                    "status": "not_available"
+                }
+        except Exception as monitor_error:
+            logger.error(f"RAG monitor check failed: {str(monitor_error)}")
+            health_data["components"]["rag_monitor"] = {
+                "status": "error",
+                "error": str(monitor_error)
+            }
+
+        # Check user stats from database
+        try:
+            user_count = db.session.query(User).count()
+            pdf_count = db.session.query(Pdf).filter_by(is_deleted=False).count()
+            conversation_count = db.session.query(Conversation).filter_by(is_deleted=False).count()
+
+            health_data["components"]["database_stats"] = {
+                "status": "ok",
+                "user_count": user_count,
+                "pdf_count": pdf_count,
+                "conversation_count": conversation_count
+            }
+        except Exception as db_stats_error:
+            logger.error(f"Database stats check failed: {str(db_stats_error)}")
+            health_data["components"]["database_stats"] = {
+                "status": "error",
+                "error": str(db_stats_error)
+            }
+
+        # Check file storage
+        try:
+            from app.web.files import get_s3_client
+            s3_client = get_s3_client()
+            if s3_client:
+                health_data["components"]["storage"] = {
+                    "status": "ok",
+                    "type": "s3",
+                    "bucket": current_app.config.get('AWS_BUCKET_NAME', 'unknown')
+                }
+            else:
+                health_data["components"]["storage"] = {
+                    "status": "error",
+                    "message": "S3 client initialization failed"
+                }
+        except Exception as storage_error:
+            logger.error(f"Storage check failed: {str(storage_error)}")
+            health_data["components"]["storage"] = {
+                "status": "error",
+                "error": str(storage_error)
+            }
 
         # Determine overall status
-        if all(s == "ok" for s in [result["mongodb_status"], result["qdrant_status"]] if s):
-            result["status"] = "ok"
-        elif any(s == "ok" for s in [result["mongodb_status"], result["qdrant_status"]] if s):
-            result["status"] = "degraded"
-        else:
-            result["status"] = "error"
+        component_statuses = [
+            comp.get("status") for comp in health_data["components"].values()
+        ]
 
-        return jsonify(result)
+        if all(status == "ok" for status in component_statuses):
+            health_data["status"] = "ok"
+        elif "error" in component_statuses:
+            health_data["status"] = "error"
+        else:
+            health_data["status"] = "degraded"
+
+        return jsonify(health_data)
 
     except Exception as e:
-        logger.error(f"Vector store health check failed: {str(e)}")
+        logger.error(f"System health check failed: {str(e)}", exc_info=True)
         return jsonify({
             "status": "error",
             "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
+            "traceback": traceback.format_exc()
         }), 500
 
-@bp.route("/embeddings", methods=["GET"])
-@async_handler
-async def embeddings_stats():
-    """
-    Get detailed statistics about embeddings in the vector store.
-    Provides counts by document, type, and other dimensions.
-    """
+@bp.route("/databases", methods=["GET"])
+@login_required
+def check_databases():
+    """Check database connections and status."""
     try:
-        # Get the vector store
+        # Get current database status
+        mongo_store = get_mongo_store()
+        qdrant_store = get_qdrant_store()
         vector_store = get_vector_store()
 
-        # Initialize response
-        response = {
-            "status": "checking",
-            "counts": {},
-            "types": {},
-            "documents": {},
+        # Check initialization status
+        db_status = {
+            "mongo": {
+                "initialized": mongo_store._initialized,
+                "status": "ok" if mongo_store._initialized else "error"
+            },
+            "qdrant": {
+                "initialized": qdrant_store._initialized,
+                "status": "ok" if qdrant_store._initialized else "error"
+            },
+            "vector_store": {
+                "initialized": vector_store._initialized,
+                "status": "ok" if vector_store._initialized else "error"
+            },
             "timestamp": datetime.utcnow().isoformat()
         }
 
-        # Get document IDs to query - either from request or recent docs
-        pdf_ids = request.args.getlist("pdf_id")
-        limit = int(request.args.get("limit", "10"))
+        # Check if we should attempt initialization
+        force_init = request.args.get("force_init", "").lower() == "true"
+        if force_init or not all([
+            mongo_store._initialized,
+            qdrant_store._initialized,
+            vector_store._initialized
+        ]):
+            logger.info("Attempting database initialization")
 
-        if not pdf_ids:
-            # Get recent PDFs
-            recent_pdfs_result = await get_recent_pdfs(limit)
-            pdf_ids = [pdf["pdf_id"] for pdf in recent_pdfs_result.get("pdfs", [])]
+            # Try initializing MongoDB
+            if not mongo_store._initialized:
+                mongo_init_success = mongo_store.initialize()
+                db_status["mongo"]["initialization_attempted"] = True
+                db_status["mongo"]["initialization_success"] = mongo_init_success
+                if mongo_init_success:
+                    db_status["mongo"]["status"] = "ok"
+                    db_status["mongo"]["initialized"] = True
 
-        # Query embedding statistics per document
-        total_vectors = 0
-        document_counts = {}
-        content_type_counts = {}
-        chunk_level_counts = {}
-        embedding_type_counts = {}
+            # Try initializing Qdrant
+            if not qdrant_store._initialized:
+                qdrant_init_success = qdrant_store.initialize()
+                db_status["qdrant"]["initialization_attempted"] = True
+                db_status["qdrant"]["initialization_success"] = qdrant_init_success
+                if qdrant_init_success:
+                    db_status["qdrant"]["status"] = "ok"
+                    db_status["qdrant"]["initialized"] = True
 
-        # Check if we have the necessary methods in our vector stores
-        has_detailed_stats = hasattr(vector_store, "get_embedding_stats")
+            # Try initializing Vector Store
+            if not vector_store._initialized:
+                vector_init_success = vector_store.initialize()
+                db_status["vector_store"]["initialization_attempted"] = True
+                db_status["vector_store"]["initialization_success"] = vector_init_success
+                if vector_init_success:
+                    db_status["vector_store"]["status"] = "ok"
+                    db_status["vector_store"]["initialized"] = True
 
-        if has_detailed_stats:
-            # Use the detailed stats method if available
-            stats = await vector_store.get_embedding_stats(pdf_ids)
+        # Get MongoDB stats if initialized
+        if mongo_store._initialized:
+            try:
+                mongo_stats = mongo_store.get_stats()
+                db_status["mongo"]["stats"] = mongo_stats
+            except Exception as mongo_error:
+                logger.error(f"Error getting MongoDB stats: {str(mongo_error)}")
+                db_status["mongo"]["stats_error"] = str(mongo_error)
 
-            # Process stats
-            total_vectors = stats.get("total", 0)
-            document_counts = stats.get("documents", {})
-            content_type_counts = stats.get("content_types", {})
-            chunk_level_counts = stats.get("chunk_levels", {})
-            embedding_type_counts = stats.get("embedding_types", {})
-        else:
-            # Fallback to basic stats from health check
-            health = await vector_store.check_health()
-            if "qdrant_status" in health and "vector_count" in health["qdrant_status"]:
-                total_vectors = health["qdrant_status"]["vector_count"]
+        # Get vector counts from Qdrant if initialized
+        if qdrant_store._initialized and qdrant_store.client:
+            try:
+                collection_count = qdrant_store.client.count(
+                    collection_name=qdrant_store.collection_name,
+                    count_filter=None
+                )
+                db_status["qdrant"]["vector_count"] = collection_count.count
 
-        # Fill response
-        response["counts"]["total"] = total_vectors
-        response["documents"] = document_counts
-        response["types"]["content_types"] = content_type_counts
-        response["types"]["chunk_levels"] = chunk_level_counts
-        response["types"]["embedding_types"] = embedding_type_counts
+                # Get collection info
+                collection_info = qdrant_store.client.get_collection(qdrant_store.collection_name)
+                db_status["qdrant"]["collection_info"] = {
+                    "name": qdrant_store.collection_name,
+                    "dimension": collection_info.config.params.vectors.size,
+                    "distance": str(collection_info.config.params.vectors.distance),
+                }
+            except Exception as qdrant_error:
+                logger.error(f"Error getting Qdrant stats: {str(qdrant_error)}")
+                db_status["qdrant"]["stats_error"] = str(qdrant_error)
 
-        # Set status
-        response["status"] = "ok" if total_vectors > 0 else "no_data"
+        # Check overall database status
+        all_initialized = all([
+            db_status["mongo"]["initialized"],
+            db_status["qdrant"]["initialized"],
+            db_status["vector_store"]["initialized"]
+        ])
 
-        return jsonify(response)
+        if request.path == "/api/health/databases":  # Only for direct endpoint access
+            return jsonify({
+                "status": "ok" if all_initialized else "degraded",
+                "databases": db_status,
+                "all_initialized": all_initialized,
+            })
+
+        return db_status
 
     except Exception as e:
-        logger.error(f"Embeddings stats check failed: {str(e)}")
-        return jsonify({
+        error_response = {
             "status": "error",
             "error": str(e),
+            "traceback": traceback.format_exc(),
             "timestamp": datetime.utcnow().isoformat()
-        }), 500
+        }
+
+        if request.path == "/api/health/databases":  # Only for direct endpoint access
+            return jsonify(error_response), 500
+
+        return error_response
 
 @bp.route("/pdf/<string:pdf_id>", methods=["GET"])
+@login_required
 @async_handler
 async def check_pdf(pdf_id):
-    """
-    Check status of a specific PDF with enhanced metrics.
-    Includes embedding counts, processing status, and document metadata.
-    """
+    """Check PDF existence and health in the system."""
     try:
-        # Get basic PDF status
-        result = await check_pdf_status(pdf_id)
-
-        # Try to get embedding counts by content type
-        try:
-            # Get vector store
-            vector_store = get_vector_store()
-
-            # Check if we have the method to get detailed embedding stats for a PDF
-            if hasattr(vector_store, "get_embedding_stats_for_pdf"):
-                embedding_stats = await vector_store.get_embedding_stats_for_pdf(pdf_id)
-                result["embeddings"] = embedding_stats
-            elif hasattr(vector_store.qdrant_store, "get_counts_by_filter"):
-                # Fallback to direct Qdrant query
-                filter_dict = {"pdf_id": pdf_id}
-                counts = await vector_store.qdrant_store.get_counts_by_filter(filter_dict)
-
-                # Add to result
-                result["embeddings"] = {
-                    "total": counts.get("total", 0)
-                }
-        except Exception as embedding_err:
-            logger.warning(f"Could not retrieve embedding stats: {str(embedding_err)}")
-            result["embeddings_error"] = str(embedding_err)
-
-        # Try to get document content metrics
-        try:
-            from app.chat.vector_stores.mongo_store import get_mongo_store
-            mongo_store = get_mongo_store()
-
-            if hasattr(mongo_store, "get_elements_by_pdf_id"):
-                # Count elements by content type
-                elements = mongo_store.get_elements_by_pdf_id(pdf_id, limit=1000)
-
-                content_types = {}
-                for element in elements:
-                    content_type = element.get("content_type", "unknown")
-                    content_types[content_type] = content_types.get(content_type, 0) + 1
-
-                result["content_metrics"] = {
-                    "total_elements": len(elements),
-                    "by_content_type": content_types
-                }
-        except Exception as content_err:
-            logger.warning(f"Could not retrieve content metrics: {str(content_err)}")
-            result["content_metrics_error"] = str(content_err)
-
-        return jsonify(result)
-
-    except Exception as e:
-        logger.error(f"Error checking PDF status: {str(e)}", exc_info=True)
-        return jsonify({
-            "status": "error",
-            "error": str(e),
+        result = {
             "pdf_id": pdf_id,
-            "timestamp": datetime.utcnow().isoformat()
-        }), 500
+            "timestamp": datetime.utcnow().isoformat(),
+            "exists": {
+                "database": False,
+                "mongodb": False,
+                "qdrant": False,
+                "s3": False
+            },
+            "metadata": {},
+            "vector_info": {}
+        }
 
-@bp.route("/pdfs", methods=["GET"])
-@async_handler
-async def list_pdfs():
-    """
-    Get a list of all PDFs with their processing status.
-    Supports filtering and pagination.
-    """
-    try:
-        # Get query parameters
-        limit = int(request.args.get("limit", "20"))
-        offset = int(request.args.get("offset", "0"))
-        processed = request.args.get("processed", None)  # None, "true", "false"
-        category = request.args.get("category", None)
+        # Check in SQL database
+        pdf_record = db.session.query(Pdf).filter_by(id=pdf_id).first()
+        if pdf_record:
+            result["exists"]["database"] = True
+            result["metadata"] = {
+                "name": pdf_record.name,
+                "processed": pdf_record.processed,
+                "error": pdf_record.error,
+                "category": pdf_record.category,
+                "description": pdf_record.description,
+                "created_at": pdf_record.created_at.isoformat() if hasattr(pdf_record.created_at, "isoformat") else str(pdf_record.created_at),
+                "updated_at": pdf_record.updated_at.isoformat() if hasattr(pdf_record.updated_at, "isoformat") else str(pdf_record.updated_at)
+            }
 
-        # Build query
-        from app.web.db.models import Pdf
-        query = db.select(Pdf).filter_by(is_deleted=False)
-
-        # Apply filters
-        if processed is not None:
-            if processed.lower() == "true":
-                query = query.filter_by(processed=True)
-            elif processed.lower() == "false":
-                query = query.filter_by(processed=False)
-
-        if category:
-            query = query.filter_by(category=category)
-
-        # Apply pagination and order
-        query = query.order_by(Pdf.created_at.desc()).offset(offset).limit(limit)
-
-        # Execute query
-        pdfs = db.session.execute(query).scalars().all()
-
-        # Format results
-        pdf_list = []
-        for pdf in pdfs:
-            # Check if vectors exist for this PDF
-            vector_status = "unknown"
+            # Get additional metadata if available
             try:
-                vector_store = get_vector_store()
-                health = await vector_store.check_health()
-                if health.get("status") in ["ok", "degraded"]:
-                    vector_status = "available"
+                meta = pdf_record.get_metadata()
+                if meta:
+                    result["metadata"]["document_meta"] = meta
             except:
                 pass
 
-            # Format PDF info
-            pdf_info = {
-                "id": pdf.id,
-                "name": pdf.name,
-                "processed": pdf.processed,
-                "error": pdf.error,
-                "category": pdf.category,
-                "created_at": pdf.created_at.isoformat() if hasattr(pdf.created_at, "isoformat") else str(pdf.created_at),
-                "metadata": pdf.get_metadata(),
-                "vector_status": vector_status
-            }
-            pdf_list.append(pdf_info)
+        # Check in MongoDB
+        mongo_store = get_mongo_store()
+        if mongo_store._initialized:
+            doc = mongo_store.get_document(pdf_id)
+            if doc:
+                result["exists"]["mongodb"] = True
+                result["mongodb_info"] = {
+                    "title": doc.get("title", ""),
+                    "created_at": str(doc.get("created_at", "")),
+                    "updated_at": str(doc.get("updated_at", ""))
+                }
 
-        # Get total count
-        total_count = db.session.execute(
-            db.select(db.func.count()).select_from(Pdf).filter_by(is_deleted=False)
-        ).scalar()
+                # Count elements
+                try:
+                    elements = mongo_store.get_elements_by_pdf_id(pdf_id, limit=5000)
+                    result["mongodb_info"]["element_count"] = len(elements)
 
-        return jsonify({
-            "pdfs": pdf_list,
-            "total": total_count,
-            "limit": limit,
-            "offset": offset,
-            "timestamp": datetime.utcnow().isoformat()
-        })
+                    # Get content type breakdown
+                    content_types = {}
+                    for elem in elements:
+                        ct = elem.get("content_type", "unknown")
+                        content_types[ct] = content_types.get(ct, 0) + 1
+                    result["mongodb_info"]["content_types"] = content_types
+
+                    # Get concept count
+                    concepts = mongo_store.get_concepts_by_pdf_id(pdf_id, limit=5000)
+                    result["mongodb_info"]["concept_count"] = len(concepts)
+                except Exception as count_error:
+                    logger.error(f"Error counting elements: {str(count_error)}")
+                    result["mongodb_info"]["error"] = str(count_error)
+
+        # Check in Qdrant
+        qdrant_store = get_qdrant_store()
+        if qdrant_store._initialized and qdrant_store.client:
+            try:
+                count_result = qdrant_store.client.count(
+                    collection_name=qdrant_store.collection_name,
+                    count_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="pdf_id",
+                                match=models.MatchValue(value=pdf_id)
+                            )
+                        ]
+                    )
+                )
+
+                result["exists"]["qdrant"] = count_result.count > 0
+                result["vector_info"]["embedding_count"] = count_result.count
+
+                if count_result.count > 0:
+                    # Get a sample of vectors
+                    sample_result = qdrant_store.client.scroll(
+                        collection_name=qdrant_store.collection_name,
+                        scroll_filter=models.Filter(
+                            must=[
+                                models.FieldCondition(
+                                    key="pdf_id",
+                                    match=models.MatchValue(value=pdf_id)
+                                )
+                            ]
+                        ),
+                        limit=5,
+                        with_payload=True,
+                        with_vectors=False
+                    )
+
+                    # Extract metadata from samples
+                    samples = []
+                    for point in sample_result[0]:
+                        if point.payload:
+                            samples.append({
+                                "element_id": point.payload.get("element_id", ""),
+                                "content_type": point.payload.get("content_type", ""),
+                                "page_number": point.payload.get("page_number", 0),
+                            })
+
+                    result["vector_info"]["samples"] = samples
+            except Exception as qdrant_error:
+                logger.error(f"Error checking Qdrant for PDF {pdf_id}: {str(qdrant_error)}")
+                result["vector_info"]["error"] = str(qdrant_error)
+
+        # Check in S3
+        try:
+            from app.web.files import get_s3_client, get_s3_key
+            s3_client = get_s3_client()
+            if s3_client:
+                s3_key = get_s3_key(pdf_id)
+                try:
+                    s3_client.head_object(
+                        Bucket=current_app.config['AWS_BUCKET_NAME'],
+                        Key=s3_key
+                    )
+                    result["exists"]["s3"] = True
+                    result["s3_info"] = {
+                        "bucket": current_app.config['AWS_BUCKET_NAME'],
+                        "key": s3_key
+                    }
+                except Exception as s3_head_error:
+                    # Object doesn't exist or other error
+                    logger.info(f"S3 head check failed for {pdf_id}: {str(s3_head_error)}")
+                    result["s3_info"] = {"error": str(s3_head_error)}
+        except Exception as s3_error:
+            logger.error(f"Error checking S3 for PDF {pdf_id}: {str(s3_error)}")
+            result["s3_info"] = {"error": str(s3_error)}
+
+        # Test a simple query if document exists in both MongoDB and Qdrant
+        if result["exists"]["mongodb"] and result["exists"]["qdrant"]:
+            try:
+                vector_store = get_vector_store()
+                if vector_store._initialized:
+                    # Simple test query
+                    test_results = vector_store.semantic_search(
+                        query="what is this document about",
+                        k=3,
+                        pdf_id=pdf_id
+                    )
+
+                    result["query_test"] = {
+                        "status": "ok",
+                        "result_count": len(test_results),
+                        "success": len(test_results) > 0
+                    }
+            except Exception as query_error:
+                logger.error(f"Error testing query for PDF {pdf_id}: {str(query_error)}")
+                result["query_test"] = {
+                    "status": "error",
+                    "error": str(query_error)
+                }
+
+        # Overall status
+        any_exists = any(result["exists"].values())
+        all_exists = all([
+            result["exists"]["database"],
+            result["exists"]["mongodb"],
+            result["exists"]["qdrant"],
+            result["exists"]["s3"]
+        ])
+
+        if all_exists:
+            result["status"] = "ok"
+        elif any_exists:
+            result["status"] = "partial"
+
+            # Identify specific misalignment
+            if result["exists"]["database"] and not result["exists"]["mongodb"]:
+                result["issue"] = "PDF exists in database but not in MongoDB"
+            elif result["exists"]["database"] and not result["exists"]["qdrant"]:
+                result["issue"] = "PDF exists in database but not in Qdrant"
+            elif result["exists"]["database"] and not result["exists"]["s3"]:
+                result["issue"] = "PDF exists in database but not in S3"
+        else:
+            result["status"] = "not_found"
+
+        return jsonify(result)
 
     except Exception as e:
-        logger.error(f"Error listing PDFs: {str(e)}", exc_info=True)
+        logger.error(f"PDF check failed for {pdf_id}: {str(e)}", exc_info=True)
         return jsonify({
             "status": "error",
+            "pdf_id": pdf_id,
             "error": str(e),
+            "traceback": traceback.format_exc(),
             "timestamp": datetime.utcnow().isoformat()
         }), 500
 
-@bp.route("/conversations", methods=["GET"])
-@async_handler
-async def conversation_stats():
-    """
-    Get statistics about conversations in the system.
-    Includes counts, message distribution, and active conversations.
-    """
+@bp.route("/query_test", methods=["POST"])
+@login_required
+def test_query():
+    """Test a query against the vector store without going through the full workflow."""
     try:
-        # Get query parameters
-        days = int(request.args.get("days", "7"))  # Default to last 7 days
+        data = request.json
+        if not data or "query" not in data:
+            return jsonify({"error": "Query is required"}), 400
 
-        # Calculate date threshold
-        threshold_date = datetime.utcnow() - timedelta(days=days)
+        query = data["query"]
+        pdf_id = data.get("pdf_id")
+        k = int(data.get("k", 5))
 
-        # Get conversation counts
-        from app.web.db.models import Conversation, Message
+        # Get vector store
+        vector_store = get_vector_store()
+        if not vector_store._initialized:
+            if not vector_store.initialize():
+                return jsonify({"error": "Vector store not initialized"}), 500
 
-        # Total conversations
-        total_convos = db.session.execute(
-            db.select(db.func.count()).select_from(Conversation)
-        ).scalar()
+        # Execute semantic search
+        start_time = time.time()
+        results = vector_store.semantic_search(
+            query=query,
+            k=k,
+            pdf_id=pdf_id
+        )
+        query_time = time.time() - start_time
 
-        # Active conversations (not deleted)
-        active_convos = db.session.execute(
-            db.select(db.func.count()).select_from(Conversation).filter_by(is_deleted=False)
-        ).scalar()
+        # Format results
+        formatted_results = []
+        for i, doc in enumerate(results):
+            # Truncate long content for the response
+            content = doc.page_content
+            if len(content) > 300:
+                content = content[:300] + "..."
 
-        # Recent conversations (created in the last N days)
-        recent_convos = db.session.execute(
-            db.select(db.func.count()).select_from(Conversation)
-            .filter(Conversation.created_on >= threshold_date)
-        ).scalar()
-
-        # Total messages
-        total_messages = db.session.execute(
-            db.select(db.func.count()).select_from(Message)
-        ).scalar()
-
-        # Messages by role
-        message_counts = {}
-        for role in ["user", "assistant", "system", "tool"]:
-            count = db.session.execute(
-                db.select(db.func.count()).select_from(Message).filter_by(role=role)
-            ).scalar()
-            message_counts[role] = count
-
-        # Recent messages (last N days)
-        recent_messages = db.session.execute(
-            db.select(db.func.count()).select_from(Message)
-            .filter(Message.created_on >= threshold_date)
-        ).scalar()
-
-        # Get PDF IDs with most conversations
-        pdf_conversation_counts = db.session.execute(
-            db.text("""
-                SELECT pdf_id, COUNT(*) as count
-                FROM conversation
-                WHERE is_deleted = FALSE
-                GROUP BY pdf_id
-                ORDER BY count DESC
-                LIMIT 10
-            """)
-        ).fetchall()
-
-        top_pdfs = [{"pdf_id": row[0], "conversation_count": row[1]} for row in pdf_conversation_counts]
-
-        # Try to get PDF names for these IDs
-        from app.web.db.models import Pdf
-        for pdf_data in top_pdfs:
-            pdf_id = pdf_data["pdf_id"]
-            pdf = db.session.execute(
-                db.select(Pdf).filter_by(id=pdf_id)
-            ).scalar_one_or_none()
-
-            if pdf:
-                pdf_data["name"] = pdf.name
-
-        # Activity over time (messages per day for last N days)
-        daily_activity = []
-        for i in range(days):
-            day = datetime.utcnow() - timedelta(days=i)
-            day_start = datetime(day.year, day.month, day.day, 0, 0, 0)
-            day_end = datetime(day.year, day.month, day.day, 23, 59, 59)
-
-            # Count messages
-            message_count = db.session.execute(
-                db.select(db.func.count()).select_from(Message)
-                .filter(Message.created_on >= day_start)
-                .filter(Message.created_on <= day_end)
-            ).scalar()
-
-            # Count conversations
-            convo_count = db.session.execute(
-                db.select(db.func.count()).select_from(Conversation)
-                .filter(Conversation.created_on >= day_start)
-                .filter(Conversation.created_on <= day_end)
-            ).scalar()
-
-            daily_activity.append({
-                "date": day_start.isoformat(),
-                "message_count": message_count,
-                "conversation_count": convo_count
+            formatted_results.append({
+                "index": i,
+                "content": content,
+                "score": doc.metadata.get("score", 0),
+                "pdf_id": doc.metadata.get("pdf_id", ""),
+                "content_type": doc.metadata.get("content_type", ""),
+                "page": doc.metadata.get("page_number", 0) or doc.metadata.get("page", 0),
+                "element_id": doc.metadata.get("element_id", ""),
             })
 
-        # Conversation length distribution
-        conversation_lengths = db.session.execute(
-            db.text("""
-                SELECT c.id, COUNT(m.id) as message_count
-                FROM conversation c
-                LEFT JOIN message m ON c.id = m.conversation_id
-                WHERE c.is_deleted = FALSE
-                GROUP BY c.id
-            """)
-        ).fetchall()
-
-        # Calculate distribution
-        length_distribution = {}
-        for _, count in conversation_lengths:
-            # Group into ranges: 1-5, 6-10, 11-20, 21-50, 50+
-            if count <= 5:
-                key = "1-5"
-            elif count <= 10:
-                key = "6-10"
-            elif count <= 20:
-                key = "11-20"
-            elif count <= 50:
-                key = "21-50"
-            else:
-                key = "50+"
-
-            length_distribution[key] = length_distribution.get(key, 0) + 1
-
-        return jsonify({
-            "summary": {
-                "total_conversations": total_convos,
-                "active_conversations": active_convos,
-                "recent_conversations": recent_convos,
-                "total_messages": total_messages,
-                "recent_messages": recent_messages,
-                "avg_messages_per_conversation": round(total_messages / max(1, total_convos), 2)
-            },
-            "messages_by_role": message_counts,
-            "top_pdfs_by_conversations": top_pdfs,
-            "daily_activity": daily_activity,
-            "conversation_length_distribution": length_distribution,
-            "time_period_days": days,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-
-    except Exception as e:
-        logger.error(f"Error getting conversation stats: {str(e)}", exc_info=True)
-        return jsonify({
-            "status": "error",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }), 500
-
-@bp.route("/memory", methods=["GET"])
-@async_handler
-async def memory_stats():
-    """
-    Get statistics about the memory management system.
-    Provides insights into conversation persistence and memory usage.
-    """
-    try:
-        # Create memory manager
-        memory_manager = MemoryManager()
-
-        # Get stats if possible
-        memory_stats = {}
-        if hasattr(memory_manager, "get_stats"):
-            memory_stats = memory_manager.get_stats()
-
-        # Count active conversations in the memory system
-        conversation_count = 0
-        if hasattr(memory_manager, "list_conversations"):
-            conversations = memory_manager.list_conversations()
-            conversation_count = len(conversations)
-
-        # Get memory system type
-        memory_type = "SQL"  # Default
-        if hasattr(memory_manager, "memory_type"):
-            memory_type = memory_manager.memory_type
-
-        # Get other database metrics if available
-        from app.web.db.models import Conversation, Message
-
-        # Total conversations in DB
-        total_convos = db.session.execute(
-            db.select(db.func.count()).select_from(Conversation)
-        ).scalar()
-
-        # Total messages in DB
-        total_messages = db.session.execute(
-            db.select(db.func.count()).select_from(Message)
-        ).scalar()
-
-        # Check if conversation and message counts match
-        consistency_status = "unknown"
-        if conversation_count > 0:
-            consistency_status = "consistent" if conversation_count == total_convos else "inconsistent"
-
-        return jsonify({
-            "memory_system": {
-                "type": memory_type,
-                "active_conversations": conversation_count,
-                "stats": memory_stats
-            },
-            "database": {
-                "total_conversations": total_convos,
-                "total_messages": total_messages,
-                "consistency_status": consistency_status
-            },
-            "timestamp": datetime.utcnow().isoformat()
-        })
-
-    except Exception as e:
-        logger.error(f"Error getting memory stats: {str(e)}", exc_info=True)
-        return jsonify({
-            "status": "error",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }), 500
-
-@bp.route("/dashboard", methods=["GET"])
-@async_handler
-async def dashboard_summary():
-    """
-    Get a comprehensive system summary for the dashboard.
-    Aggregates key metrics from all health endpoints.
-    """
-    try:
-        # Initialize response
+        # Create response
         response = {
-            "status": "ok",
-            "system": {},
-            "database": {},
-            "vector_stores": {},
-            "pdf_processing": {},
-            "conversations": {},
-            "timestamp": datetime.utcnow().isoformat()
+            "query": query,
+            "pdf_id": pdf_id,
+            "results_count": len(results),
+            "time_taken": query_time,
+            "results": formatted_results
         }
 
-        # Get basic system metrics
-        memory = psutil.virtual_memory()
-        response["system"] = {
-            "cpu_percent": psutil.cpu_percent(interval=0.5),
-            "memory_percent": memory.percent,
-            "memory_used_gb": round(memory.used / (1024**3), 2),
-            "memory_total_gb": round(memory.total / (1024**3), 2)
-        }
-
-        # Get database metrics
+        # Also perform a keyword search for comparison
         try:
-            # Run a simple query to check database connection
-            result = db.session.execute(db.text("SELECT 1")).fetchone()
-            db_status = "ok" if result[0] == 1 else "error"
+            mongo_store = get_mongo_store()
+            if mongo_store._initialized:
+                keyword_start_time = time.time()
+                keyword_results = mongo_store.keyword_search(
+                    query=query,
+                    pdf_id=pdf_id,
+                    limit=k
+                )
+                keyword_time = time.time() - keyword_start_time
 
-            # Get table counts
-            table_counts = {}
-            for table_name in ["user", "pdf", "conversation", "message"]:
-                count = db.session.execute(
-                    db.text(f"SELECT COUNT(*) FROM {table_name}")
-                ).scalar()
-                table_counts[table_name] = count
+                # Format keyword results
+                formatted_keyword_results = []
+                for i, result in enumerate(keyword_results):
+                    content = result.get("content", "")
+                    if len(content) > 300:
+                        content = content[:300] + "..."
 
-            response["database"] = {
-                "status": db_status,
-                "table_counts": table_counts
-            }
-        except Exception as db_err:
-            response["database"] = {
-                "status": "error",
-                "error": str(db_err)
-            }
+                    formatted_keyword_results.append({
+                        "index": i,
+                        "content": content,
+                        "score": result.get("score", 0),
+                        "pdf_id": result.get("pdf_id", ""),
+                        "content_type": result.get("content_type", ""),
+                        "page": result.get("page_number", 0) or result.get("page", 0),
+                        "element_id": result.get("element_id", ""),
+                    })
 
-        # Get vector store metrics
-        try:
-            # Get the vector store
-            vector_store = get_vector_store()
-            health = await vector_store.check_health()
-
-            response["vector_stores"] = {
-                "status": health.get("status", "unknown"),
-                "mongodb_ready": health.get("mongo_ready", False),
-                "qdrant_ready": health.get("qdrant_ready", False)
-            }
-
-            # Get vector counts if available
-            if "qdrant_status" in health and "vector_count" in health["qdrant_status"]:
-                response["vector_stores"]["vector_count"] = health["qdrant_status"]["vector_count"]
-        except Exception as vs_err:
-            response["vector_stores"] = {
-                "status": "error",
-                "error": str(vs_err)
-            }
-
-        # Get PDF processing metrics
-        try:
-            from app.web.db.models import Pdf
-
-            # Get total PDFs
-            total_pdfs = db.session.execute(
-                db.select(db.func.count()).select_from(Pdf).filter_by(is_deleted=False)
-            ).scalar()
-
-            # Get processed PDFs
-            processed_pdfs = db.session.execute(
-                db.select(db.func.count()).select_from(Pdf).filter_by(is_deleted=False, processed=True)
-            ).scalar()
-
-            # Get error PDFs
-            error_pdfs = db.session.execute(
-                db.select(db.func.count()).select_from(Pdf)
-                .filter_by(is_deleted=False, processed=False)
-                .filter(Pdf.error != None)
-            ).scalar()
-
-            response["pdf_processing"] = {
-                "total": total_pdfs,
-                "processed": processed_pdfs,
-                "errors": error_pdfs,
-                "processing_rate": f"{(processed_pdfs / max(1, total_pdfs)) * 100:.2f}%"
-            }
-        except Exception as pdf_err:
-            response["pdf_processing"] = {
-                "status": "error",
-                "error": str(pdf_err)
-            }
-
-        # Get conversation metrics
-        try:
-            from app.web.db.models import Conversation, Message
-
-            # Total active conversations
-            active_convos = db.session.execute(
-                db.select(db.func.count()).select_from(Conversation).filter_by(is_deleted=False)
-            ).scalar()
-
-            # Recent conversations (last 24 hours)
-            yesterday = datetime.utcnow() - timedelta(days=1)
-            recent_convos = db.session.execute(
-                db.select(db.func.count()).select_from(Conversation)
-                .filter(Conversation.created_on >= yesterday)
-            ).scalar()
-
-            # Total messages
-            total_messages = db.session.execute(
-                db.select(db.func.count()).select_from(Message)
-            ).scalar()
-
-            # Message counts by role
-            user_messages = db.session.execute(
-                db.select(db.func.count()).select_from(Message).filter_by(role="user")
-            ).scalar()
-
-            assistant_messages = db.session.execute(
-                db.select(db.func.count()).select_from(Message).filter_by(role="assistant")
-            ).scalar()
-
-            response["conversations"] = {
-                "active": active_convos,
-                "recent": recent_convos,
-                "messages": {
-                    "total": total_messages,
-                    "user": user_messages,
-                    "assistant": assistant_messages
-                },
-                "avg_per_conversation": round(total_messages / max(1, active_convos), 2)
-            }
-        except Exception as conv_err:
-            response["conversations"] = {
-                "status": "error",
-                "error": str(conv_err)
-            }
-
-        # Determine overall status
-        status_values = [
-            response["database"].get("status"),
-            response["vector_stores"].get("status"),
-        ]
-
-        if all(s == "ok" for s in status_values if s):
-            response["status"] = "ok"
-        elif any(s == "error" for s in status_values if s):
-            response["status"] = "error"
-        else:
-            response["status"] = "degraded"
+                response["keyword_search"] = {
+                    "results_count": len(keyword_results),
+                    "time_taken": keyword_time,
+                    "results": formatted_keyword_results
+                }
+        except Exception as keyword_error:
+            logger.error(f"Keyword search error: {str(keyword_error)}")
+            response["keyword_search_error"] = str(keyword_error)
 
         return jsonify(response)
 
     except Exception as e:
-        logger.error(f"Error generating dashboard summary: {str(e)}", exc_info=True)
+        logger.error(f"Query test failed: {str(e)}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
+
+@bp.route("/metrics", methods=["GET"])
+@login_required
+def get_system_metrics():
+    """Get system-wide metrics and stats."""
+    try:
+        metrics = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "database": {},
+            "vector_store": {},
+            "pdfs": {},
+            "conversations": {},
+            "users": {}
+        }
+
+        # Get SQL database stats
+        try:
+            # PDF stats
+            pdf_count = db.session.query(Pdf).count()
+            active_pdf_count = db.session.query(Pdf).filter_by(is_deleted=False).count()
+            processed_pdf_count = db.session.query(Pdf).filter_by(processed=True).count()
+            error_pdf_count = db.session.query(Pdf).filter(Pdf.error.isnot(None)).count()
+
+            metrics["pdfs"] = {
+                "total": pdf_count,
+                "active": active_pdf_count,
+                "processed": processed_pdf_count,
+                "with_errors": error_pdf_count,
+                "percent_processed": round((processed_pdf_count / max(1, active_pdf_count)) * 100, 2)
+            }
+
+            # Conversation stats
+            conversation_count = db.session.query(Conversation).count()
+            active_conversation_count = db.session.query(Conversation).filter_by(is_deleted=False).count()
+
+            # Try to get average messages per conversation
+            try:
+                from app.web.db.models.message import Message
+                message_count = db.session.query(Message).count()
+                avg_messages = message_count / max(1, conversation_count)
+            except:
+                message_count = 0
+                avg_messages = 0
+
+            metrics["conversations"] = {
+                "total": conversation_count,
+                "active": active_conversation_count,
+                "messages": message_count,
+                "avg_messages_per_conversation": round(avg_messages, 2)
+            }
+
+            # User stats
+            user_count = db.session.query(User).count()
+            metrics["users"] = {
+                "total": user_count,
+                "avg_pdfs_per_user": round(pdf_count / max(1, user_count), 2),
+                "avg_conversations_per_user": round(conversation_count / max(1, user_count), 2)
+            }
+        except Exception as db_error:
+            logger.error(f"Error getting database metrics: {str(db_error)}")
+            metrics["database"]["error"] = str(db_error)
+
+        # MongoDB stats
+        mongo_store = get_mongo_store()
+        if mongo_store._initialized:
+            try:
+                mongo_stats = mongo_store.get_stats()
+                metrics["mongodb"] = mongo_stats
+            except Exception as mongo_error:
+                logger.error(f"Error getting MongoDB metrics: {str(mongo_error)}")
+                metrics["mongodb"] = {"error": str(mongo_error)}
+
+        # Qdrant stats
+        qdrant_store = get_qdrant_store()
+        if qdrant_store._initialized and qdrant_store.client:
+            try:
+                # Get collection count
+                collection_count = qdrant_store.client.count(
+                    collection_name=qdrant_store.collection_name,
+                    count_filter=None
+                )
+
+                # Get collection info
+                collection_info = qdrant_store.client.get_collection(qdrant_store.collection_name)
+
+                metrics["qdrant"] = {
+                    "vector_count": collection_count.count,
+                    "collection": qdrant_store.collection_name,
+                    "dimension": collection_info.config.params.vectors.size
+                }
+
+                # Get metrics for operations
+                metrics["qdrant"]["metrics"] = qdrant_store.metrics
+
+            except Exception as qdrant_error:
+                logger.error(f"Error getting Qdrant metrics: {str(qdrant_error)}")
+                metrics["qdrant"] = {"error": str(qdrant_error)}
+
+        # Memory manager stats
+        try:
+            memory_manager = MemoryManager()
+            memory_stats = memory_manager.get_stats()
+            metrics["memory_manager"] = memory_stats
+        except Exception as memory_error:
+            logger.error(f"Error getting memory manager metrics: {str(memory_error)}")
+            metrics["memory_manager"] = {"error": str(memory_error)}
+
+        # RAG Monitor stats if available
+        try:
+            if hasattr(current_app, 'config') and 'RAG_MONITOR' in current_app.config:
+                monitor = current_app.config['RAG_MONITOR']
+                recent_ops = monitor.get_recent_operations(20)
+
+                # Aggregate operations by type
+                op_types = {}
+                for op in recent_ops:
+                    op_type = op.get("operation", "unknown")
+                    op_types[op_type] = op_types.get(op_type, 0) + 1
+
+                metrics["rag_monitor"] = {
+                    "recent_operations": len(recent_ops),
+                    "operation_types": op_types
+                }
+        except Exception as monitor_error:
+            logger.error(f"Error getting RAG monitor metrics: {str(monitor_error)}")
+            metrics["rag_monitor"] = {"error": str(monitor_error)}
+
+        return jsonify(metrics)
+
+    except Exception as e:
+        logger.error(f"Error getting system metrics: {str(e)}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
+
+@bp.route("/vector_stores", methods=["GET"])
+@login_required
+@async_handler
+async def check_vector_stores():
+    """Detailed health check for vector stores."""
+    try:
+        # Get vector stores
+        mongo_store = get_mongo_store()
+        qdrant_store = get_qdrant_store()
+        vector_store = get_vector_store()
+
+        # Check health asynchronously
+        health_info = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "mongo": {"status": "checking"},
+            "qdrant": {"status": "checking"},
+            "unified": {"status": "checking"}
+        }
+
+        # Use ThreadPoolExecutor for parallel health checks
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            # Submit tasks
+            mongo_future = executor.submit(async_check_mongo_health, mongo_store)
+            qdrant_future = executor.submit(async_check_qdrant_health, qdrant_store)
+            unified_future = executor.submit(async_check_unified_health, vector_store)
+
+            # Get results
+            health_info["mongo"] = mongo_future.result()
+            health_info["qdrant"] = qdrant_future.result()
+            health_info["unified"] = unified_future.result()
+
+        # Determine overall status
+        if (health_info["mongo"]["status"] == "ok" and
+            health_info["qdrant"]["status"] == "ok" and
+            health_info["unified"]["status"] == "ok"):
+            health_info["status"] = "ok"
+        elif (health_info["mongo"]["status"] == "error" or
+              health_info["qdrant"]["status"] == "error" or
+              health_info["unified"]["status"] == "error"):
+            health_info["status"] = "error"
+        else:
+            health_info["status"] = "degraded"
+
+        return jsonify(health_info)
+
+    except Exception as e:
+        logger.error(f"Vector store health check failed: {str(e)}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
+
+async def async_check_mongo_health(mongo_store):
+    """Check MongoDB health asynchronously."""
+    try:
+        if not mongo_store._initialized:
+            return {
+                "status": "error",
+                "error": "MongoDB not initialized",
+                "initialized": False
+            }
+
+        # Check connection
+        if not mongo_store.client:
+            return {
+                "status": "error",
+                "error": "MongoDB client not available",
+                "initialized": True
+            }
+
+        # Check if we can ping
+        mongo_store.client.admin.command('ping')
+
+        # Get collection stats
+        collection_stats = {}
+        for collection_name in ["documents", "content_elements", "concepts", "relationships"]:
+            collection = getattr(mongo_store.db, collection_name)
+            collection_stats[collection_name] = collection.count_documents({})
+
+        return {
+            "status": "ok",
+            "initialized": True,
+            "collections": collection_stats,
+            "database": mongo_store.db_name
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "initialized": mongo_store._initialized
+        }
+
+async def async_check_qdrant_health(qdrant_store):
+    """Check Qdrant health asynchronously."""
+    try:
+        if not qdrant_store._initialized:
+            return {
+                "status": "error",
+                "error": "Qdrant not initialized",
+                "initialized": False
+            }
+
+        # Check if client is available
+        if not qdrant_store.client:
+            return {
+                "status": "error",
+                "error": "Qdrant client not available",
+                "initialized": True
+            }
+
+        # Check collection
+        collection_info = qdrant_store.client.get_collection(qdrant_store.collection_name)
+
+        # Count vectors
+        count_result = qdrant_store.client.count(
+            collection_name=qdrant_store.collection_name,
+            count_filter=None
+        )
+
+        return {
+            "status": "ok",
+            "initialized": True,
+            "collection": qdrant_store.collection_name,
+            "vector_count": count_result.count,
+            "dimension": collection_info.config.params.vectors.size,
+            "distance": str(collection_info.config.params.vectors.distance)
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "initialized": qdrant_store._initialized
+        }
+
+async def async_check_unified_health(vector_store):
+    """Check unified vector store health asynchronously."""
+    try:
+        if not vector_store._initialized:
+            return {
+                "status": "error",
+                "error": "Unified vector store not initialized",
+                "initialized": False
+            }
+
+        # Check component stores
+        mongo_initialized = vector_store.mongo_store._initialized if hasattr(vector_store, 'mongo_store') else False
+        qdrant_initialized = vector_store.qdrant_store._initialized if hasattr(vector_store, 'qdrant_store') else False
+
+        # Use internal check_health method
+        health = await vector_store.check_health()
+
+        health_data = {
+            "status": health.get("status", "error"),
+            "initialized": vector_store._initialized,
+            "components": {
+                "mongo_ready": mongo_initialized,
+                "qdrant_ready": qdrant_initialized
+            },
+            "embedding_model": vector_store.embedding_model,
+            "embedding_dimension": vector_store.embedding_dimension
+        }
+
+        # Add more details if available
+        if "mongo_status" in health:
+            health_data["mongo_details"] = health["mongo_status"]
+
+        if "qdrant_status" in health:
+            health_data["qdrant_details"] = health["qdrant_status"]
+
+        # Get metrics
+        health_data["metrics"] = vector_store.metrics
+
+        return health_data
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "initialized": vector_store._initialized
+        }
+
+@bp.route("/memory", methods=["GET"])
+@login_required
+def check_memory_manager():
+    """Check memory manager health and stats."""
+    try:
+        memory_manager = MemoryManager()
+        memory_stats = memory_manager.get_stats()
+
+        memory_health = {
+            "status": "ok",
+            "stats": memory_stats,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        # Try to get a sample of conversations
+        try:
+            conversation_sample = memory_manager.list_conversations()[:5]
+            sample_data = []
+
+            for conv in conversation_sample:
+                sample_data.append({
+                    "id": conv.conversation_id,
+                    "title": conv.title,
+                    "pdf_id": conv.pdf_id,
+                    "message_count": len(conv.messages),
+                    "updated_at": conv.updated_at.isoformat() if hasattr(conv.updated_at, "isoformat") else str(conv.updated_at)
+                })
+
+            memory_health["conversation_sample"] = sample_data
+        except Exception as sample_error:
+            logger.error(f"Error getting conversation sample: {str(sample_error)}")
+            memory_health["sample_error"] = str(sample_error)
+
+        return jsonify(memory_health)
+    except Exception as e:
+        logger.error(f"Memory manager health check failed: {str(e)}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
+
+@bp.route("/diagnostic", methods=["GET"])
+@login_required
+def run_system_diagnostic():
+    """Run a comprehensive system diagnostic."""
+    try:
+        # Start with basic diagnostics
+        diagnostic = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "system": {},
+            "database": {},
+            "vector_stores": {},
+            "memory": {},
+            "file_storage": {}
+        }
+
+        # Check package versions
+        import pkg_resources
+        python_version = sys.version
+
+        try:
+            packages = [
+                "flask", "sqlalchemy", "pymongo", "qdrant_client",
+                "openai", "langchain", "langgraph", "boto3"
+            ]
+
+            package_versions = {}
+            for package in packages:
+                try:
+                    version = pkg_resources.get_distribution(package).version
+                    package_versions[package] = version
+                except:
+                    package_versions[package] = "not found"
+
+            diagnostic["system"]["python_version"] = python_version
+            diagnostic["system"]["packages"] = package_versions
+        except Exception as pkg_error:
+            logger.error(f"Error checking package versions: {str(pkg_error)}")
+            diagnostic["system"]["package_error"] = str(pkg_error)
+
+        # Check database connections
+        database_health = check_databases()
+        diagnostic["database"] = database_health
+
+        # Check vector stores health
+        try:
+            mongo_store = get_mongo_store()
+            qdrant_store = get_qdrant_store()
+            vector_store = get_vector_store()
+
+            # Basic initialization check
+            diagnostic["vector_stores"] = {
+                "mongo_initialized": mongo_store._initialized,
+                "qdrant_initialized": qdrant_store._initialized,
+                "unified_initialized": vector_store._initialized
+            }
+
+            # Try a basic test query
+            if vector_store._initialized:
+                test_results = vector_store.semantic_search(
+                    query="test",
+                    k=1
+                )
+
+                diagnostic["vector_stores"]["test_query"] = {
+                    "status": "ok",
+                    "results": len(test_results)
+                }
+        except Exception as vs_error:
+            logger.error(f"Error checking vector stores: {str(vs_error)}")
+            diagnostic["vector_stores"]["error"] = str(vs_error)
+
+        # Memory manager check
+        try:
+            memory_manager = MemoryManager()
+            memory_stats = memory_manager.get_stats()
+            diagnostic["memory"] = memory_stats
+        except Exception as mem_error:
+            logger.error(f"Error checking memory manager: {str(mem_error)}")
+            diagnostic["memory"]["error"] = str(mem_error)
+
+        # File storage check
+        try:
+            from app.web.files import get_s3_client
+            s3_client = get_s3_client()
+
+            if s3_client:
+                bucket_name = current_app.config['AWS_BUCKET_NAME']
+
+                # Try to list a few objects
+                response = s3_client.list_objects_v2(
+                    Bucket=bucket_name,
+                    MaxKeys=5
+                )
+
+                diagnostic["file_storage"] = {
+                    "status": "ok",
+                    "type": "s3",
+                    "bucket": bucket_name,
+                    "sample_count": len(response.get('Contents', []))
+                }
+        except Exception as storage_error:
+            logger.error(f"Error checking file storage: {str(storage_error)}")
+            diagnostic["file_storage"]["error"] = str(storage_error)
+
+        # Overall health assessment
+        health_issues = []
+
+        # Check database
+        if isinstance(diagnostic["database"], dict) and diagnostic["database"].get("status") != "ok":
+            health_issues.append("Database connectivity issues")
+
+        # Check vector stores
+        if not all([
+            diagnostic["vector_stores"].get("mongo_initialized", False),
+            diagnostic["vector_stores"].get("qdrant_initialized", False),
+            diagnostic["vector_stores"].get("unified_initialized", False)
+        ]):
+            health_issues.append("Vector store initialization issues")
+
+        # Check file storage
+        if "error" in diagnostic.get("file_storage", {}):
+            health_issues.append("File storage connectivity issues")
+
+        if health_issues:
+            diagnostic["health_assessment"] = {
+                "status": "issues_detected",
+                "issues": health_issues,
+                "recommendations": [
+                    "Check database connections",
+                    "Verify environment variables",
+                    "Ensure vector stores are properly initialized",
+                    "Check S3 credentials and permissions"
+                ]
+            }
+        else:
+            diagnostic["health_assessment"] = {
+                "status": "healthy",
+                "message": "All systems appear to be functioning correctly"
+            }
+
+        return jsonify(diagnostic)
+
+    except Exception as e:
+        logger.error(f"System diagnostic failed: {str(e)}", exc_info=True)
         return jsonify({
             "status": "error",
             "error": str(e),

@@ -265,7 +265,20 @@ class UnifiedVectorStore:
         chunk_level: Optional[ChunkLevel] = None,
         embedding_type: Optional[EmbeddingType] = None
     ) -> List[Document]:
-        """Perform semantic search using vector similarity."""
+        """
+        Perform semantic search using vector similarity.
+
+        Args:
+            query: Query text
+            k: Number of results to return
+            pdf_id: Optional PDF ID to filter by
+            content_types: Optional list of content types to filter by
+            chunk_level: Optional chunk level to filter by
+            embedding_type: Optional embedding type to filter by
+
+        Returns:
+            List of document results
+        """
         if not self._initialized:
             if not self.initialize():
                 return []
@@ -285,22 +298,71 @@ class UnifiedVectorStore:
         if embedding_type:
             filter_dict["embedding_type"] = str(embedding_type)
 
-        # Execute search
-        start_time = datetime.utcnow()
-        results = self.qdrant_store.similarity_search(
-            query=query,
-            k=k,
-            filter_dict=filter_dict
-        )
+        try:
+            # Log the filter being used
+            logger.debug(f"Semantic search filter: {filter_dict}")
 
-        # Update metrics
-        self.metrics["queries"] += 1
-        query_time = (datetime.utcnow() - start_time).total_seconds()
-        self.metrics["total_query_time"] += query_time
-        self.metrics["avg_query_time"] = self.metrics["total_query_time"] / self.metrics["queries"]
+            # Execute search with proper filter format
+            start_time = datetime.utcnow()
+            results = self.qdrant_store.similarity_search(
+                query=query,
+                k=k,
+                filter_dict=filter_dict
+            )
 
-        logger.info(f"Semantic search completed in {query_time:.2f}s, found {len(results)} results")
-        return results
+            # Handle empty results
+            if not results:
+                logger.info(f"No results found for query: {query[:50]}...")
+                # Try fallback to keyword search if no results
+                if len(query.split()) > 1:  # Only try keyword search for multi-word queries
+                    logger.info(f"Trying keyword search fallback for: {query[:50]}...")
+                    keyword_results = self.mongo_store.keyword_search(
+                        query=query,
+                        pdf_id=pdf_id,
+                        content_types=content_types,
+                        limit=k
+                    )
+
+                    # Convert to Document objects
+                    if keyword_results:
+                        logger.info(f"Found {len(keyword_results)} results from keyword search fallback")
+                        return [
+                            Document(
+                                page_content=result.get("content", ""),
+                                metadata={
+                                    **{k: v for k, v in result.items() if k != "content"},
+                                    "source": "keyword_search"
+                                }
+                            )
+                            for result in keyword_results
+                        ]
+
+            # Update metrics
+            self.metrics["queries"] += 1
+            query_time = (datetime.utcnow() - start_time).total_seconds()
+            self.metrics["total_query_time"] += query_time
+            self.metrics["avg_query_time"] = self.metrics["total_query_time"] / self.metrics["queries"]
+
+            # Enhance results with document metadata if available
+            enhanced_results = []
+            for doc in results:
+                doc_id = doc.metadata.get("pdf_id")
+                if doc_id:
+                    # Try to get document metadata
+                    doc_metadata = self.mongo_store.get_document(doc_id)
+                    if doc_metadata:
+                        # Add document title if available
+                        if "title" in doc_metadata and "document_title" not in doc.metadata:
+                            doc.metadata["document_title"] = doc_metadata["title"]
+
+                enhanced_results.append(doc)
+
+            logger.info(f"Semantic search completed in {query_time:.2f}s, found {len(enhanced_results)} results")
+            return enhanced_results
+        except Exception as e:
+            logger.error(f"Error in semantic search: {str(e)}", exc_info=True)
+            self.metrics["errors"] += 1
+            return []
 
     def keyword_search(
         self,
@@ -345,56 +407,102 @@ class UnifiedVectorStore:
         chunk_level: Optional[ChunkLevel] = None,
         embedding_type: Optional[EmbeddingType] = None
     ) -> List[Document]:
-        """Perform hybrid search combining semantic and keyword search."""
+        """
+        Perform hybrid search combining semantic and keyword search.
+
+        Args:
+            query: Query text
+            k: Number of results to return
+            pdf_ids: Optional list of PDF IDs to query
+            content_types: Optional list of content types to filter by
+            chunk_level: Optional chunk level to filter by
+            embedding_type: Optional embedding type to filter by
+
+        Returns:
+            Combined list of document results
+        """
         if not self._initialized:
             if not self.initialize():
                 return []
 
-        # Handle multiple PDF IDs for research mode
-        all_results = []
+        try:
+            # Handle multiple PDF IDs for research mode
+            all_results = []
 
-        # If no PDF IDs provided, use None for unrestricted search
-        if not pdf_ids:
-            pdf_ids = [None]
+            # If no PDF IDs provided, use None for unrestricted search
+            if not pdf_ids:
+                pdf_ids = [None]
 
-        # Process each PDF ID
-        for pdf_id in pdf_ids:
-            # Perform semantic search
-            semantic_results = self.semantic_search(
-                query=query,
-                k=k,
-                pdf_id=pdf_id,
-                content_types=content_types,
-                chunk_level=chunk_level,
-                embedding_type=embedding_type
-            )
+            # Process each PDF ID
+            for pdf_id in pdf_ids:
+                # Skip None values if we have valid PDF IDs
+                if pdf_id is None and len(pdf_ids) > 1:
+                    continue
 
-            # Perform keyword search
-            keyword_results = self.keyword_search(
-                query=query,
-                k=k//2,  # Use fewer keyword results
-                pdf_id=pdf_id,
-                content_types=content_types
-            )
+                # Perform semantic search
+                semantic_results = self.semantic_search(
+                    query=query,
+                    k=k,
+                    pdf_id=pdf_id,
+                    content_types=content_types,
+                    chunk_level=chunk_level,
+                    embedding_type=embedding_type
+                )
 
-            # Combine results for this PDF ID
-            pdf_results = self._combine_search_results(
-                semantic_results,
-                keyword_results,
-                k
-            )
+                # Perform keyword search
+                keyword_results = self.mongo_store.keyword_search(
+                    query=query,
+                    pdf_id=pdf_id,
+                    content_types=content_types,
+                    limit=k//2  # Use fewer keyword results
+                )
 
-            all_results.extend(pdf_results)
+                # Convert keyword results to Document objects
+                keyword_docs = []
+                for result in keyword_results:
+                    metadata = {k: v for k, v in result.items() if k != "content"}
+                    metadata["source"] = "keyword_search"
 
-        # If we have multiple PDFs, sort by overall score
-        if len(pdf_ids) > 1 and pdf_ids[0] is not None:
-            all_results.sort(
-                key=lambda x: x.metadata.get("score", 0),
-                reverse=True
-            )
+                    doc = Document(
+                        page_content=result.get("content", ""),
+                        metadata=metadata
+                    )
+                    keyword_docs.append(doc)
 
-        # Limit to top k results
-        return all_results[:k]
+                # Combine results for this PDF ID
+                pdf_results = self._combine_search_results(
+                    semantic_results,
+                    keyword_docs,
+                    k
+                )
+
+                all_results.extend(pdf_results)
+
+            # If we have multiple PDFs, sort by overall score
+            if len(pdf_ids) > 1 and pdf_ids[0] is not None:
+                all_results.sort(
+                    key=lambda x: x.metadata.get("score", 0),
+                    reverse=True
+                )
+
+            # If we still have no results, try a broader search
+            if not all_results and pdf_ids[0] is not None:
+                logger.info("No results found for specific PDFs, trying broader search")
+                return self.hybrid_search(
+                    query=query,
+                    k=k,
+                    pdf_ids=[None],  # Search across all documents
+                    content_types=content_types,
+                    chunk_level=chunk_level,
+                    embedding_type=embedding_type
+                )
+
+            # Limit to top k results
+            return all_results[:k]
+
+        except Exception as e:
+            logger.error(f"Error in hybrid search: {str(e)}", exc_info=True)
+            return []
 
     def _combine_search_results(
         self,

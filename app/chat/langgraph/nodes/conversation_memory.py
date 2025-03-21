@@ -13,6 +13,8 @@ from app.chat.utils.extraction import extract_technical_terms
 
 logger = logging.getLogger(__name__)
 
+# Update to app/chat/langgraph/nodes/conversation_memory.py
+
 def process_conversation_memory(state: GraphState) -> GraphState:
     """
     Process conversation memory and extract technical concepts.
@@ -38,15 +40,20 @@ def process_conversation_memory(state: GraphState) -> GraphState:
     cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
     state.conversation_state.metadata["cycle_count"] = cycle_count + 1
 
+    logger.debug(f"Conversation memory cycle count: {cycle_count + 1}")
+
     # If we've processed too many cycles, mark as complete to end graph
     if cycle_count > 3:
         state.conversation_state.metadata["processed_response"] = True
         logger.warning(f"Forcing end of processing after {cycle_count} cycles")
         return state
 
-    # If we have a generation_state with response but haven't processed it yet
-    if (state.generation_state and state.generation_state.response and
-        not state.conversation_state.metadata.get("processed_response", False)):
+    # Check if we have a generation_state with response but haven't processed it yet
+    has_generation = (state.generation_state and state.generation_state.response)
+    already_processed = state.conversation_state.metadata.get("processed_response", False)
+
+    if has_generation and not already_processed:
+        logger.info("Processing AI response and adding to conversation history")
 
         # Extract any additional technical terms from the AI response
         response_terms = extract_technical_terms(state.generation_state.response)
@@ -73,17 +80,19 @@ def process_conversation_memory(state: GraphState) -> GraphState:
             metadata
         )
 
-        # Mark the response as processed
+        # CRITICAL: Mark the response as processed to stop recursion
         state.conversation_state.metadata["processed_response"] = True
 
         # Reset cycle count after processing
         state.conversation_state.metadata["cycle_count"] = 0
 
         logger.info(f"Added AI response to conversation history with {len(response_terms)} technical terms")
+        logger.debug(f"Set processed_response flag to TRUE")
         return state
 
-    # Add system message if not already present and no processed_response flag
-    if not state.conversation_state.metadata.get("processed_response", False):
+    # Process query state if not already done
+    if not already_processed and state.query_state and state.query_state.query:
+        # Make sure we have a system message
         if not any(msg.type == MessageType.SYSTEM for msg in state.conversation_state.messages):
             # Default system prompt
             system_prompt = "You are an AI assistant specialized in answering questions about technical documents."
@@ -95,39 +104,34 @@ def process_conversation_memory(state: GraphState) -> GraphState:
             state.conversation_state.add_message(MessageType.SYSTEM, system_prompt)
             logger.info("Added system message to conversation")
 
-        # Process human message if present in query state
-        if state.query_state and state.query_state.query:
-            # Extract technical terms from user query
-            technical_terms = extract_technical_terms(state.query_state.query)
+        # Extract technical terms from user query
+        technical_terms = extract_technical_terms(state.query_state.query)
 
-            # Update the conversation state with these technical terms
-            if technical_terms:
+        # Update the conversation state with these technical terms
+        if technical_terms:
+            for term in technical_terms:
+                if term not in state.conversation_state.technical_concepts:
+                    state.conversation_state.technical_concepts.append(term)
+
+            logger.info(f"Extracted technical terms: {technical_terms}")
+
+            # Also add them to query state for current retrieval
+            if state.query_state:
                 for term in technical_terms:
-                    if term not in state.conversation_state.technical_concepts:
-                        state.conversation_state.technical_concepts.append(term)
+                    if term not in state.query_state.concepts:
+                        state.query_state.concepts.append(term)
 
-                logger.info(f"Extracted technical terms: {technical_terms}")
+        # Check if this query is already in the messages to avoid duplicates
+        user_messages = [msg for msg in state.conversation_state.messages if msg.type == MessageType.USER]
+        is_duplicate = any(msg.content == state.query_state.query for msg in user_messages)
 
-                # Also add them to query state for current retrieval
-                if state.query_state:
-                    for term in technical_terms:
-                        if term not in state.query_state.concepts:
-                            state.query_state.concepts.append(term)
+        if not is_duplicate:
+            state.conversation_state.add_message(MessageType.USER, state.query_state.query)
+            logger.info(f"Added human message to conversation history: {state.query_state.query[:50]}...")
 
-            # Add the human message to conversation history if not already there
-            # Use message content comparison to avoid duplicates
-            user_messages = [msg for msg in state.conversation_state.messages if msg.type == MessageType.USER]
-
-            # Check if this query is already in the messages
-            is_duplicate = any(msg.content == state.query_state.query for msg in user_messages)
-
-            if not is_duplicate:
-                state.conversation_state.add_message(MessageType.USER, state.query_state.query)
-                logger.info(f"Added human message to conversation history: {state.query_state.query[:50]}...")
-
-                # Ensure PDF ID is properly set
-                if not state.conversation_state.pdf_id and state.query_state.pdf_ids:
-                    state.conversation_state.pdf_id = state.query_state.pdf_ids[0]
+            # Ensure PDF ID is properly set
+            if not state.conversation_state.pdf_id and state.query_state.pdf_ids:
+                state.conversation_state.pdf_id = state.query_state.pdf_ids[0]
 
     # Store conversation update timestamp
     state.conversation_state.updated_at = datetime.now()

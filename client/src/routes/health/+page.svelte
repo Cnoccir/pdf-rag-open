@@ -1,7 +1,6 @@
 <script lang="ts">
   import AuthGuard from '$c/AuthGuard.svelte';
   import HealthDashboard from '$c/HealthDashboard.svelte';
-  import Navbar from '$c/Navbar.svelte';
   import ErrorModal from '$c/ErrorModal.svelte';
 </script>
 
