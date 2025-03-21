@@ -85,7 +85,7 @@ def generate_knowledge(state: GraphState) -> GraphState:
 
         # Call the OpenAI API
         response = client.chat.completions.create(
-            model="gpt-4",  # Using GPT-4 for better synthesis
+            model="gpt-4o-mini",  # Using GPT-4 for better synthesis
             messages=[
                 {"role": "system", "content": "You are an expert knowledge synthesizer for technical documentation."},
                 {"role": "user", "content": prompt}
@@ -133,7 +133,7 @@ def generate_knowledge(state: GraphState) -> GraphState:
             insights=synthesis.get("insights", []),
             metadata={
                 "synthesis": synthesis,
-                "model": "gpt-4",
+                "model": "gpt-4o-mini",
                 "element_count": len(state.retrieval_state.elements),
                 "generated_at": datetime.now().isoformat()
             }

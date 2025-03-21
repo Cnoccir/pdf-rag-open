@@ -260,6 +260,32 @@ class ConceptNetwork(BaseModel):
         pass
 
 # -----------------------
+# Search and Query Models
+# -----------------------
+class SearchQuery(BaseModel):
+    """Query for searching document content."""
+    query: str
+    content_types: Optional[List[Union[ContentType, str]]] = None
+    technical_terms: Optional[List[str]] = None
+    max_results: Optional[int] = 10
+    research_mode: bool = False
+    favor_visual: bool = False
+    favor_tables: bool = False
+    favor_code: bool = False
+    active_pdf_ids: Optional[List[str]] = None
+
+class SearchResult(BaseModel):
+    """Result from a document search."""
+    content: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    score: float = 0.0
+    element_id: Optional[str] = None
+    pdf_id: Optional[str] = None
+    page_number: Optional[int] = None
+    content_type: Optional[str] = ContentType.TEXT
+    document_title: Optional[str] = None
+    
+# -----------------------
 # Processing Models
 # -----------------------
 class ProcessingConfig(BaseModel):

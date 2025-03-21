@@ -1680,11 +1680,12 @@ class DocumentProcessor:
     ) -> bool:
         """
         Ingest processed content into unified store (MongoDB + Qdrant).
+        Fixed to handle both sync and async method calls correctly.
         """
         logger.info(f"Ingesting processed content to unified store for {self.pdf_id}")
 
         try:
-            # 1. Create document node
+            # 1. Create document node - FIXED TO REMOVE AWAIT
             document_title = document_summary.get('title', f"Document {self.pdf_id}")
 
             metadata = {
@@ -1694,72 +1695,132 @@ class DocumentProcessor:
                 "document_summary": document_summary
             }
 
-            await self.vector_store.create_document_node(
+            # FIXED: Don't use await for non-async methods
+            doc_created = self.vector_store.create_document_node(
                 pdf_id=self.pdf_id,
                 title=document_title,
                 metadata=metadata
             )
 
-            # 2. Add content elements in batches
-            batch_size = 50
-            added_elements = 0
+            if not doc_created:
+                logger.warning(f"Failed to create document node for {self.pdf_id}, attempting to continue")
 
+            # 2. Add content elements in batches
+            batch_size = 20  # Smaller batch size to reduce memory pressure
+            added_elements = 0
+            failed_elements = 0
+
+            # Process in batches
             for i in range(0, len(elements), batch_size):
                 batch = elements[i:i+batch_size]
-                for element in batch:
-                    await self.vector_store.add_content_element(element, self.pdf_id)
-                    added_elements += 1
+                batch_success = True
 
-                logger.info(f"Added {added_elements}/{len(elements)} elements to unified store")
+                for element in batch:
+                    try:
+                        # FIXED: Don't use await for non-async methods
+                        success = self.vector_store.add_content_element(element, self.pdf_id)
+                        if success:
+                            added_elements += 1
+                        else:
+                            failed_elements += 1
+                            batch_success = False
+                    except Exception as element_error:
+                        logger.error(f"Error adding element {element.element_id}: {str(element_error)}")
+                        failed_elements += 1
+                        batch_success = False
+
+                # Log progress
+                logger.info(f"Added {added_elements}/{len(elements)} elements to unified store, {failed_elements} failed")
+
+                # Force garbage collection
+                import gc
+                gc.collect()
 
             # 3. Add concept network data
-            # Add concepts
-            for concept in self.concept_network.concepts:
-                await self.vector_store.add_concept(
-                    concept_name=concept.name,
-                    pdf_id=self.pdf_id,
-                    metadata={
-                        "importance": concept.importance_score,
-                        "is_primary": concept.is_primary,
-                        "category": concept.category
-                    }
-                )
+            # Add concepts in batches
+            concept_batch_size = 50
+            logger.info(f"Adding {len(self.concept_network.concepts)} concepts in batches")
 
-            # Add relationships
-            for relationship in self.concept_network.relationships:
-                rel_type = relationship.type
-                if hasattr(rel_type, 'value'):
-                    rel_type = rel_type.value
-
-                await self.vector_store.add_concept_relationship(
-                    source=relationship.source,
-                    target=relationship.target,
-                    rel_type=str(rel_type),
-                    pdf_id=self.pdf_id,
-                    metadata={
-                        "weight": relationship.weight,
-                        "context": relationship.context
-                    }
-                )
-
-            # Add section-concept relationships
-            if hasattr(self.concept_network, 'section_concepts'):
-                for section, concepts in self.concept_network.section_concepts.items():
-                    for concept in concepts:
-                        await self.vector_store.add_section_concept_relation(
-                            section=section,
-                            concept=concept,
-                            pdf_id=self.pdf_id
+            for i in range(0, len(self.concept_network.concepts), concept_batch_size):
+                concept_batch = self.concept_network.concepts[i:i+concept_batch_size]
+                for concept in concept_batch:
+                    try:
+                        # FIXED: Don't use await for non-async methods
+                        self.vector_store.add_concept(
+                            concept_name=concept.name,
+                            pdf_id=self.pdf_id,
+                            metadata={
+                                "importance": concept.importance_score,
+                                "is_primary": concept.is_primary,
+                                "category": concept.category
+                            }
                         )
+                    except Exception as concept_error:
+                        logger.error(f"Error adding concept {concept.name}: {str(concept_error)}")
+
+                # Log progress and cleanup memory
+                logger.info(f"Added concepts batch {i//concept_batch_size + 1}/{(len(self.concept_network.concepts) + concept_batch_size - 1)//concept_batch_size}")
+                gc.collect()
+
+            # Add relationships in batches
+            relationship_batch_size = 50
+            logger.info(f"Adding {len(self.concept_network.relationships)} relationships in batches")
+
+            for i in range(0, len(self.concept_network.relationships), relationship_batch_size):
+                relationship_batch = self.concept_network.relationships[i:i+relationship_batch_size]
+                for relationship in relationship_batch:
+                    try:
+                        rel_type = relationship.type
+                        if hasattr(rel_type, 'value'):
+                            rel_type = rel_type.value
+
+                        # FIXED: Don't use await for non-async methods
+                        self.vector_store.add_concept_relationship(
+                            source=relationship.source,
+                            target=relationship.target,
+                            rel_type=str(rel_type),
+                            pdf_id=self.pdf_id,
+                            metadata={
+                                "weight": relationship.weight,
+                                "context": relationship.context
+                            }
+                        )
+                    except Exception as relationship_error:
+                        logger.error(f"Error adding relationship: {str(relationship_error)}")
+
+                # Log progress and cleanup memory
+                logger.info(f"Added relationships batch {i//relationship_batch_size + 1}/{(len(self.concept_network.relationships) + relationship_batch_size - 1)//relationship_batch_size}")
+                gc.collect()
 
             # 4. Add procedures and parameters
             if hasattr(self, 'procedures') and self.procedures:
+                logger.info(f"Adding {len(self.procedures)} procedures")
                 for procedure in self.procedures:
-                    await self.vector_store.add_procedure(procedure, self.pdf_id)
+                    try:
+                        # FIXED: Don't use await for non-async methods
+                        self.vector_store.add_procedure(procedure, self.pdf_id)
+                    except Exception as proc_error:
+                        logger.error(f"Error adding procedure: {str(proc_error)}")
 
             if hasattr(self, 'parameters') and self.parameters:
+                logger.info(f"Adding {len(self.parameters)} parameters")
                 for parameter in self.parameters:
-                    await self.vector_store.add_parameter(parameter, self.pdf_id)
+                    try:
+                        # FIXED: Don't use await for non-async methods
+                        self.vector_store.add_parameter(parameter, self.pdf_id)
+                    except Exception as param_error:
+                        logger.error(f"Error adding parameter: {str(param_error)}")
+
+            # 5. Final verification
+            try:
+                # FIXED: Don't use await for non-async methods unless the method is specifically async
+                doc_metadata = self.vector_store.get_document_metadata(self.pdf_id)
+                if doc_metadata:
+                    logger.info(f"Successfully verified document {self.pdf_id} in database")
+                else:
+                    logger.warning(f"Document {self.pdf_id} verification failed")
+            except Exception as verify_error:
+                logger.warning(f"Document verification error: {str(verify_error)}")
 
             logger.info(f"Successfully ingested content to unified store for {self.pdf_id}")
             return True

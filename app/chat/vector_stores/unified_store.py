@@ -634,6 +634,157 @@ class UnifiedVectorStore:
             health_info["error"] = str(e)
             return health_info
 
+    async def create_document_node_async(
+        self,
+        pdf_id: str,
+        title: str = "Untitled Document",
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Async-compatible version of create_document_node.
+
+        Args:
+            pdf_id: Document identifier
+            title: Document title
+            metadata: Additional metadata
+
+        Returns:
+            Success status
+        """
+        # Call synchronous version
+        return self.create_document_node(pdf_id, title, metadata)
+
+    async def add_content_element_async(
+        self,
+        element: Union[ContentElement, Dict[str, Any]],
+        pdf_id: str
+    ) -> bool:
+        """
+        Async-compatible version of add_content_element.
+
+        Args:
+            element: Content element
+            pdf_id: Document identifier
+
+        Returns:
+            Success status
+        """
+        # Call synchronous version
+        return self.add_content_element(element, pdf_id)
+
+    async def add_concept_async(
+        self,
+        concept_name: str,
+        pdf_id: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Async-compatible version of add_concept.
+
+        Args:
+            concept_name: Concept name
+            pdf_id: Document identifier
+            metadata: Additional metadata
+
+        Returns:
+            Success status
+        """
+        # Call synchronous version
+        return self.add_concept(concept_name, pdf_id, metadata)
+
+    async def add_concept_relationship_async(
+        self,
+        source: str,
+        target: str,
+        rel_type: str,
+        pdf_id: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Async-compatible version of add_concept_relationship.
+
+        Args:
+            source: Source concept
+            target: Target concept
+            rel_type: Relationship type
+            pdf_id: Document identifier
+            metadata: Additional metadata
+
+        Returns:
+            Success status
+        """
+        # Call synchronous version
+        return self.add_concept_relationship(source, target, rel_type, pdf_id, metadata)
+
+    async def add_section_concept_relation_async(
+        self,
+        section: str,
+        concept: str,
+        pdf_id: str
+    ) -> bool:
+        """
+        Async-compatible version of add_section_concept_relation.
+
+        Args:
+            section: Section path or title
+            concept: Concept name
+            pdf_id: Document identifier
+
+        Returns:
+            Success status
+        """
+        # Call synchronous version
+        return self.add_section_concept_relation(section, concept, pdf_id)
+
+    async def add_procedure_async(
+        self,
+        procedure: Dict[str, Any],
+        pdf_id: str
+    ) -> bool:
+        """
+        Async-compatible version of add_procedure.
+
+        Args:
+            procedure: Procedure data
+            pdf_id: Document identifier
+
+        Returns:
+            Success status
+        """
+        # Call synchronous version
+        return self.add_procedure(procedure, pdf_id)
+
+    async def add_parameter_async(
+        self,
+        parameter: Dict[str, Any],
+        pdf_id: str
+    ) -> bool:
+        """
+        Async-compatible version of add_parameter.
+
+        Args:
+            parameter: Parameter data
+            pdf_id: Document identifier
+
+        Returns:
+            Success status
+        """
+        # Call synchronous version
+        return self.add_parameter(parameter, pdf_id)
+
+    async def get_document_metadata_async(self, pdf_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Async-compatible version of get_document_metadata.
+
+        Args:
+            pdf_id: Document identifier
+
+        Returns:
+            Document metadata or None if not found
+        """
+        # Call synchronous version
+        return self.get_document_metadata(pdf_id)
+
 # Create an alias for backward compatibility with previous Neo4j implementation
 TechDocVectorStore = UnifiedVectorStore
 

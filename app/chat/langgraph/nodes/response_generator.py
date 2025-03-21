@@ -206,7 +206,7 @@ def generate_response(state: GraphState) -> GraphState:
 
         # Call the OpenAI API
         response = client.chat.completions.create(
-            model="gpt-4",  # Using GPT-4 for improved response quality
+            model="gpt-4o-mini",  # Using GPT-4 for improved response quality
             messages=[
                 {"role": "system", "content": "You are an expert assistant for technical documentation."},
                 {"role": "user", "content": prompt}
@@ -226,7 +226,7 @@ def generate_response(state: GraphState) -> GraphState:
             citations=citations,
             metadata={
                 "timestamp": datetime.now().isoformat(),
-                "model": "gpt-4",
+                "model": "gpt-4o-mini",
                 "token_usage": {
                     "prompt_tokens": response.usage.prompt_tokens,
                     "completion_tokens": response.usage.completion_tokens,
@@ -348,7 +348,7 @@ def generate_procedure_response(state: GraphState) -> GraphState:
 
         # Call the OpenAI API
         response = client.chat.completions.create(
-            model="gpt-4",  # Use the most capable model
+            model="gpt-4o-mini",  # Use the most capable model
             messages=[
                 {"role": "system", "content": "You are an expert assistant for technical procedures."},
                 {"role": "user", "content": prompt}
@@ -371,7 +371,7 @@ def generate_procedure_response(state: GraphState) -> GraphState:
             citations=citations,
             metadata={
                 "timestamp": datetime.now().isoformat(),
-                "model": "gpt-4",
+                "model": "gpt-4o-mini",
                 "token_usage": {
                     "prompt_tokens": response.usage.prompt_tokens,
                     "completion_tokens": response.usage.completion_tokens,
