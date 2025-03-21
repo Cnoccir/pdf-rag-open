@@ -1,5 +1,3 @@
-# In app/web/tasks/embeddings.py
-
 import asyncio
 import logging
 import os
@@ -30,6 +28,20 @@ def process_document(self, pdf_id: str, config: Optional[Dict[str, Any]] = None)
     normalized_pdf_id = normalize_pdf_id(pdf_id)
 
     try:
+        # First check if document is already processed to avoid duplicate processing
+        with current_app.app_context():
+            pdf = db.session.execute(
+                db.select(Pdf).filter_by(id=pdf_id)
+            ).scalar_one_or_none()
+
+            if pdf and pdf.processed:
+                logger.info(f"Document {pdf_id} is already processed, skipping.")
+                return {
+                    "status": "skipped",
+                    "pdf_id": normalized_pdf_id,
+                    "reason": "already_processed"
+                }
+
         # Create ProcessingConfig with optimized defaults for technical documents
         processing_config = ProcessingConfig(
             pdf_id=normalized_pdf_id,
@@ -88,46 +100,58 @@ def process_document(self, pdf_id: str, config: Optional[Dict[str, Any]] = None)
                     openai_client=openai_client
                 )
 
-                # Update PDF status in database
-                pdf = db.session.execute(
-                    db.select(Pdf).filter_by(id=pdf_id)
-                ).scalar_one()
+                # Get database connection from current app context
+                with current_app.app_context():
+                    # Update PDF status in database - use a fresh query to avoid stale data
+                    pdf = db.session.execute(
+                        db.select(Pdf).filter_by(id=pdf_id)
+                    ).scalar_one_or_none()
 
-                pdf.processed = True
-                pdf.error = None
+                    if not pdf:
+                        logger.error(f"PDF {pdf_id} not found in database, cannot update status")
+                        return {
+                            "status": "error",
+                            "error": f"PDF {pdf_id} not found in database",
+                            "pdf_id": normalized_pdf_id
+                        }
 
-                # Store processing timestamp
-                pdf.processed_at = datetime.utcnow()
+                    # Set status flags
+                    pdf.processed = True
+                    pdf.error = None
 
-                # Get document summary if available
-                doc_summary_dict = None
-                if hasattr(result, 'document_summary') and result.document_summary:
-                    if isinstance(result.document_summary, dict):
-                        doc_summary_dict = result.document_summary
-                    elif hasattr(result.document_summary, 'dict'):
-                        doc_summary_dict = result.document_summary.dict()
-                    elif hasattr(result.document_summary, '__dict__'):
-                        doc_summary_dict = result.document_summary.__dict__
-                    else:
-                        doc_summary_dict = {"title": str(result.document_summary)}
+                    # Store processing timestamp
+                    pdf.processed_at = datetime.utcnow()
 
-                # Update PDF metadata
-                metadata_update = {
-                    "document_summary": doc_summary_dict,
-                    "processed_at": datetime.utcnow().isoformat(),
-                    "processing_completed": True
-                }
+                    # Get document summary if available
+                    doc_summary_dict = None
+                    if hasattr(result, 'document_summary') and result.document_summary:
+                        if isinstance(result.document_summary, dict):
+                            doc_summary_dict = result.document_summary
+                        elif hasattr(result.document_summary, 'dict'):
+                            doc_summary_dict = result.document_summary.dict()
+                        elif hasattr(result.document_summary, '__dict__'):
+                            doc_summary_dict = result.document_summary.__dict__
+                        else:
+                            doc_summary_dict = {"title": str(result.document_summary)}
 
-                # Update with vector store type indicators
-                if hasattr(vector_store, 'mongo_store') and hasattr(vector_store, 'qdrant_store'):
-                    metadata_update["mongodb_ready"] = True
-                    metadata_update["qdrant_ready"] = True
+                    # Update PDF metadata
+                    metadata_update = {
+                        "document_summary": doc_summary_dict,
+                        "processed_at": datetime.utcnow().isoformat(),
+                        "processing_completed": True
+                    }
 
-                pdf.update_metadata(metadata_update)
+                    # Update with vector store type indicators
+                    if hasattr(vector_store, 'mongo_store') and hasattr(vector_store, 'qdrant_store'):
+                        metadata_update["mongodb_ready"] = True
+                        metadata_update["qdrant_ready"] = True
 
-                # Commit changes
-                db.session.commit()
-                logger.info(f"Successfully processed document {normalized_pdf_id}")
+                    pdf.update_metadata(metadata_update)
+
+                    # Commit changes and ensure they're written to the database
+                    db.session.commit()
+                    logger.info(f"Successfully processed document {normalized_pdf_id}")
+                    db.session.close()  # Explicitly close session to release locks
 
                 return {
                     "status": "success",
@@ -140,18 +164,21 @@ def process_document(self, pdf_id: str, config: Optional[Dict[str, Any]] = None)
                 logger.error(f"Processing error for PDF {normalized_pdf_id}: {str(e)}", exc_info=True)
 
                 # Update error status
-                try:
-                    pdf = db.session.execute(
-                        db.select(Pdf).filter_by(id=pdf_id)
-                    ).scalar_one()
+                with current_app.app_context():
+                    try:
+                        pdf = db.session.execute(
+                            db.select(Pdf).filter_by(id=pdf_id)
+                        ).scalar_one_or_none()
 
-                    pdf.processed = False
-                    pdf.error = str(e)
-                    pdf.processed_at = datetime.utcnow()
-                    db.session.commit()
-                    logger.info(f"Updated error status for {normalized_pdf_id}")
-                except Exception as db_error:
-                    logger.error(f"Failed to update PDF status: {str(db_error)}")
+                        if pdf:
+                            pdf.processed = False
+                            pdf.error = str(e)
+                            pdf.processed_at = datetime.utcnow()
+                            db.session.commit()
+                            db.session.close()  # Explicitly close session
+                            logger.info(f"Updated error status for {normalized_pdf_id}")
+                    except Exception as db_error:
+                        logger.error(f"Failed to update PDF status: {str(db_error)}")
 
                 # Retry logic for specific errors
                 if isinstance(e, (TimeoutError, ConnectionError)):

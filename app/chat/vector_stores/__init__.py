@@ -8,6 +8,7 @@ import logging
 from typing import Optional
 import traceback
 
+from app.chat.vector_stores.enhanced_monitoring import enhance_vector_stores
 from app.chat.vector_stores.unified_store import UnifiedVectorStore, get_vector_store
 from app.chat.vector_stores.mongo_store import MongoStore, get_mongo_store
 from app.chat.vector_stores.qdrant_store import QdrantStore, get_qdrant_store
@@ -24,5 +25,6 @@ __all__ = [
     "TechDocVectorStore",
     "get_vector_store",
     "get_mongo_store",
-    "get_qdrant_store"
+    "get_qdrant_store",
+    "enhance_vector_stores"
 ]

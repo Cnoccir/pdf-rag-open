@@ -1,3 +1,8 @@
+"""
+Enhanced application initialization with monitoring capabilities.
+This patch adds the necessary initializations for health monitoring.
+"""
+
 from flask import Flask
 from flask_cors import CORS
 from flask_migrate import Migrate
@@ -136,8 +141,12 @@ class RAGMonitor:
         return list(self.metrics.find({"pdf_id": pdf_id}).sort("timestamp", -1))
 
 def initialize_vector_stores(app):
-    """Initialize MongoDB and Qdrant connections."""
+    """Initialize MongoDB and Qdrant connections with enhanced monitoring."""
     from app.chat.vector_stores import get_mongo_store, get_qdrant_store, get_vector_store
+
+    # Import vector store enhancements
+    # This will add new methods to the vector store classes
+    from app.chat.vector_stores.enhanced_monitoring import enhance_vector_stores
 
     app.logger.info("Initializing MongoDB connection...")
     mongo_store = get_mongo_store()
@@ -147,6 +156,10 @@ def initialize_vector_stores(app):
 
     app.logger.info("Initializing unified vector store...")
     vector_store = get_vector_store()
+
+    # Apply enhancements to vector stores
+    enhance_vector_stores()
+    app.logger.info("Applied monitoring enhancements to vector stores")
 
     # Set stores in app config for access in views
     app.config['MONGO_STORE'] = mongo_store
@@ -159,7 +172,7 @@ def initialize_vector_stores(app):
     except Exception as e:
         app.logger.error(f"Database connection check failed: {str(e)}")
 
-    app.logger.info("Vector stores initialized")
+    app.logger.info("Vector stores initialized with monitoring capabilities")
 
 async def async_connection_check(app, vector_store):
     """Check database connections asynchronously."""
@@ -195,7 +208,7 @@ def create_app():
     register_hooks(app)
     register_blueprints(app)
 
-    # Initialize vector stores
+    # Initialize vector stores with monitoring
     initialize_vector_stores(app)
 
     # Initialize monitoring
@@ -206,7 +219,7 @@ def create_app():
         celery_init_app(app)
 
     # Log successful startup with async support
-    app.logger.info("PDF RAG application started with async support")
+    app.logger.info("PDF RAG application started with async support and enhanced monitoring")
 
     # Add ContentElement validation during startup
     try:
@@ -240,7 +253,7 @@ def register_extensions(app):
     handler.setLevel(logging.INFO)
     app.logger.addHandler(handler)
     app.logger.setLevel(logging.INFO)
-    app.logger.info('PDF RAG application startup with LangGraph integration')
+    app.logger.info('PDF RAG application startup with LangGraph integration and enhanced monitoring')
 
 def register_blueprints(app):
     app.register_blueprint(auth_views.bp)

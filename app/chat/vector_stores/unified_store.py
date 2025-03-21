@@ -791,6 +791,254 @@ class UnifiedVectorStore:
         # Call synchronous version
         return self.get_document_metadata(pdf_id)
 
+#
+# UnifiedVectorStore Health Dashboard Enhancements
+#
+
+    async def get_embedding_stats(self, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Get detailed embedding statistics for documents.
+
+        Args:
+            pdf_ids: Optional list of PDF IDs to check (default: all documents)
+
+        Returns:
+            Dictionary with embedding statistics
+        """
+        if not self._initialized:
+            if not self.initialize():
+                return {"error": "Vector store not initialized"}
+
+        try:
+            # Initialize statistics
+            stats = {
+                "total": 0,
+                "documents": {},
+                "content_types": {},
+                "chunk_levels": {},
+                "embedding_types": {}
+            }
+
+            # Get counts from Qdrant
+            if hasattr(self.qdrant_store, "client") and self.qdrant_store.client:
+                # First get overall collection stats
+                collection_info = self.qdrant_store.client.get_collection(
+                    collection_name=self.qdrant_store.collection_name
+                )
+
+                # Get total vector count
+                collection_count = self.qdrant_store.client.count(
+                    collection_name=self.qdrant_store.collection_name,
+                    count_filter=None
+                )
+
+                stats["total"] = collection_count.count
+
+                # If we have specific PDF IDs, get counts for each
+                if pdf_ids:
+                    for pdf_id in pdf_ids:
+                        # Count vectors for this PDF
+                        pdf_count = self.qdrant_store.client.count(
+                            collection_name=self.qdrant_store.collection_name,
+                            count_filter={
+                                "must": [
+                                    {"key": "pdf_id", "match": {"value": pdf_id}}
+                                ]
+                            }
+                        )
+
+                        stats["documents"][pdf_id] = pdf_count.count
+
+                        # Get content type breakdown
+                        content_types = await self._get_content_type_counts(pdf_id)
+                        for content_type, count in content_types.items():
+                            # Add to global content type counts
+                            stats["content_types"][content_type] = stats["content_types"].get(content_type, 0) + count
+
+                        # Get chunk level breakdown
+                        chunk_levels = await self._get_chunk_level_counts(pdf_id)
+                        for chunk_level, count in chunk_levels.items():
+                            # Add to global chunk level counts
+                            stats["chunk_levels"][chunk_level] = stats["chunk_levels"].get(chunk_level, 0) + count
+
+                        # Get embedding type breakdown
+                        embedding_types = await self._get_embedding_type_counts(pdf_id)
+                        for embedding_type, count in embedding_types.items():
+                            # Add to global embedding type counts
+                            stats["embedding_types"][embedding_type] = stats["embedding_types"].get(embedding_type, 0) + count
+
+            return stats
+
+        except Exception as e:
+            logger.error(f"Error getting embedding stats: {str(e)}")
+            return {"error": str(e)}
+
+    async def get_embedding_stats_for_pdf(self, pdf_id: str) -> Dict[str, Any]:
+        """
+        Get detailed embedding statistics for a specific PDF.
+
+        Args:
+            pdf_id: PDF ID to check
+
+        Returns:
+            Dictionary with embedding statistics for the PDF
+        """
+        if not self._initialized:
+            if not self.initialize():
+                return {"error": "Vector store not initialized"}
+
+        try:
+            # Initialize statistics
+            stats = {
+                "total": 0,
+                "content_types": {},
+                "chunk_levels": {},
+                "embedding_types": {}
+            }
+
+            # Get counts from Qdrant
+            if hasattr(self.qdrant_store, "client") and self.qdrant_store.client:
+                # Count vectors for this PDF
+                pdf_count = self.qdrant_store.client.count(
+                    collection_name=self.qdrant_store.collection_name,
+                    count_filter={
+                        "must": [
+                            {"key": "pdf_id", "match": {"value": pdf_id}}
+                        ]
+                    }
+                )
+
+                stats["total"] = pdf_count.count
+
+                # Get content type breakdown
+                stats["content_types"] = await self._get_content_type_counts(pdf_id)
+
+                # Get chunk level breakdown
+                stats["chunk_levels"] = await self._get_chunk_level_counts(pdf_id)
+
+                # Get embedding type breakdown
+                stats["embedding_types"] = await self._get_embedding_type_counts(pdf_id)
+
+            return stats
+
+        except Exception as e:
+            logger.error(f"Error getting embedding stats for PDF {pdf_id}: {str(e)}")
+            return {"error": str(e)}
+
+    async def _get_content_type_counts(self, pdf_id: str) -> Dict[str, int]:
+        """
+        Get counts of embeddings by content type for a PDF.
+
+        Args:
+            pdf_id: PDF ID to check
+
+        Returns:
+            Dictionary mapping content types to counts
+        """
+        content_counts = {}
+
+        try:
+            # Get distinct content types for this PDF
+            search_result = self.qdrant_store.client.scroll(
+                collection_name=self.qdrant_store.collection_name,
+                scroll_filter={
+                    "must": [
+                        {"key": "pdf_id", "match": {"value": pdf_id}}
+                    ]
+                },
+                limit=100,
+                with_payload=["content_type"],
+                with_vectors=False
+            )
+
+            # Count occurrences of each content type
+            points = search_result[0]
+            for point in points:
+                if point.payload and "content_type" in point.payload:
+                    content_type = point.payload["content_type"]
+                    content_counts[content_type] = content_counts.get(content_type, 0) + 1
+
+        except Exception as e:
+            logger.error(f"Error getting content type counts: {str(e)}")
+
+        return content_counts
+
+    async def _get_chunk_level_counts(self, pdf_id: str) -> Dict[str, int]:
+        """
+        Get counts of embeddings by chunk level for a PDF.
+
+        Args:
+            pdf_id: PDF ID to check
+
+        Returns:
+            Dictionary mapping chunk levels to counts
+        """
+        chunk_counts = {}
+
+        try:
+            # Get distinct chunk levels for this PDF
+            search_result = self.qdrant_store.client.scroll(
+                collection_name=self.qdrant_store.collection_name,
+                scroll_filter={
+                    "must": [
+                        {"key": "pdf_id", "match": {"value": pdf_id}}
+                    ]
+                },
+                limit=100,
+                with_payload=["chunk_level"],
+                with_vectors=False
+            )
+
+            # Count occurrences of each chunk level
+            points = search_result[0]
+            for point in points:
+                if point.payload and "chunk_level" in point.payload:
+                    chunk_level = point.payload["chunk_level"]
+                    chunk_counts[chunk_level] = chunk_counts.get(chunk_level, 0) + 1
+
+        except Exception as e:
+            logger.error(f"Error getting chunk level counts: {str(e)}")
+
+        return chunk_counts
+
+    async def _get_embedding_type_counts(self, pdf_id: str) -> Dict[str, int]:
+        """
+        Get counts of embeddings by embedding type for a PDF.
+
+        Args:
+            pdf_id: PDF ID to check
+
+        Returns:
+            Dictionary mapping embedding types to counts
+        """
+        embedding_counts = {}
+
+        try:
+            # Get distinct embedding types for this PDF
+            search_result = self.qdrant_store.client.scroll(
+                collection_name=self.qdrant_store.collection_name,
+                scroll_filter={
+                    "must": [
+                        {"key": "pdf_id", "match": {"value": pdf_id}}
+                    ]
+                },
+                limit=100,
+                with_payload=["embedding_type"],
+                with_vectors=False
+            )
+
+            # Count occurrences of each embedding type
+            points = search_result[0]
+            for point in points:
+                if point.payload and "embedding_type" in point.payload:
+                    embedding_type = point.payload["embedding_type"]
+                    embedding_counts[embedding_type] = embedding_counts.get(embedding_type, 0) + 1
+
+        except Exception as e:
+            logger.error(f"Error getting embedding type counts: {str(e)}")
+
+        return embedding_counts
+
 # Create an alias for backward compatibility with previous Neo4j implementation
 TechDocVectorStore = UnifiedVectorStore
 

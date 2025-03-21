@@ -487,6 +487,59 @@ class QdrantStore:
             health_info["error"] = str(e)
             return health_info
 
+    async def get_counts_by_filter(self, filter_dict: Dict[str, Any]) -> Dict[str, int]:
+        """
+        Get counts of vectors matching a filter.
+
+        Args:
+            filter_dict: Filter dictionary
+
+        Returns:
+            Dictionary with counts
+        """
+        if not self._initialized:
+            if not self.initialize():
+                return {"total": 0}
+
+        try:
+            # Convert filter_dict to Qdrant filter
+            filter_condition = None
+            if filter_dict:
+                from qdrant_client.http import models
+                conditions = []
+                for key, value in filter_dict.items():
+                    if isinstance(value, list):
+                        conditions.append(
+                            models.FieldCondition(
+                                key=key,
+                                match=models.MatchAny(any=value)
+                            )
+                        )
+                    else:
+                        conditions.append(
+                            models.FieldCondition(
+                                key=key,
+                                match=models.MatchValue(value=value)
+                            )
+                        )
+
+                if conditions:
+                    filter_condition = models.Filter(
+                        must=conditions
+                    )
+
+            # Get count
+            count_result = self.client.count(
+                collection_name=self.collection_name,
+                count_filter=filter_condition
+            )
+
+            return {"total": count_result.count}
+
+        except Exception as e:
+            logger.error(f"Error getting counts by filter: {str(e)}")
+            return {"total": 0, "error": str(e)}
+            
 # Singleton instance getter
 def get_qdrant_store() -> QdrantStore:
     """Get or create Qdrant store instance"""

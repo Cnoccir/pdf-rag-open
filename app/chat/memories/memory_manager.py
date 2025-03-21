@@ -439,3 +439,52 @@ class MemoryManager:
             # Roll back transaction
             db.session.rollback()
             return False
+
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about the memory management system.
+
+        Returns:
+            Dictionary with memory manager statistics
+        """
+        stats = {
+            "conversation_count": 0,
+            "pdf_distribution": {},
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        try:
+            # Get all conversations
+            conversations = self.list_conversations()
+            stats["conversation_count"] = len(conversations)
+
+            # Count conversations by PDF ID
+            pdf_counts = {}
+            for conv in conversations:
+                pdf_id = conv.pdf_id
+                if pdf_id:
+                    pdf_counts[pdf_id] = pdf_counts.get(pdf_id, 0) + 1
+
+            # Get top PDFs by conversation count
+            sorted_pdfs = sorted(pdf_counts.items(), key=lambda x: x[1], reverse=True)
+            stats["pdf_distribution"] = {pdf_id: count for pdf_id, count in sorted_pdfs[:10]}
+
+            # Count messages
+            message_counts = {"total": 0, "by_type": {}}
+            for conv in conversations:
+                for msg in conv.messages:
+                    message_counts["total"] += 1
+                    msg_type = msg.type.value if hasattr(msg.type, "value") else str(msg.type)
+                    message_counts["by_type"][msg_type] = message_counts["by_type"].get(msg_type, 0) + 1
+
+            stats["message_counts"] = message_counts
+
+            # Get average messages per conversation
+            if stats["conversation_count"] > 0:
+                stats["avg_messages_per_conversation"] = message_counts["total"] / stats["conversation_count"]
+
+            return stats
+
+        except Exception as e:
+            logger.error(f"Error getting memory manager stats: {str(e)}")
+            return {"error": str(e)}

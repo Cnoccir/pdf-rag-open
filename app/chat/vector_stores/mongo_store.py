@@ -761,6 +761,88 @@ class MongoStore:
             health_info["error"] = str(e)
             return health_info
 
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Get enhanced statistics about the MongoDB store.
+
+        Returns:
+            Dictionary with MongoDB statistics
+        """
+        if not self._initialized:
+            if not self.initialize():
+                return {"error": "MongoDB not initialized"}
+
+        try:
+            stats = {
+                "collection_counts": {},
+                "document_stats": {},
+                "timestamp": datetime.utcnow().isoformat()
+            }
+
+            # Get collection counts
+            for collection_name in ["documents", "content_elements", "concepts", "relationships", "procedures", "parameters"]:
+                try:
+                    if hasattr(self.db, collection_name):
+                        collection = getattr(self.db, collection_name)
+                        stats["collection_counts"][collection_name] = collection.count_documents({})
+                except Exception as coll_err:
+                    stats["collection_counts"][collection_name] = f"error: {str(coll_err)}"
+
+            # Get document stats
+            if hasattr(self.db, "documents"):
+                # Count documents by metadata fields
+                try:
+                    # Count by category
+                    category_pipeline = [
+                        {"$group": {"_id": "$category", "count": {"$sum": 1}}},
+                        {"$sort": {"count": -1}}
+                    ]
+                    category_counts = list(self.db.documents.aggregate(category_pipeline))
+                    stats["document_stats"]["categories"] = {item["_id"] or "unknown": item["count"] for item in category_counts}
+
+                    # Count by processing status (if field exists)
+                    status_pipeline = [
+                        {"$group": {"_id": "$processed", "count": {"$sum": 1}}},
+                        {"$sort": {"count": -1}}
+                    ]
+                    status_counts = list(self.db.documents.aggregate(status_pipeline))
+                    stats["document_stats"]["processed_status"] = {str(item["_id"]): item["count"] for item in status_counts}
+
+                except Exception as doc_err:
+                    stats["document_stats"]["error"] = str(doc_err)
+
+            # Get concept stats
+            if hasattr(self.db, "concepts"):
+                try:
+                    # Count by primary vs regular concepts
+                    primary_pipeline = [
+                        {"$group": {"_id": "$is_primary", "count": {"$sum": 1}}},
+                        {"$sort": {"count": -1}}
+                    ]
+                    primary_counts = list(self.db.concepts.aggregate(primary_pipeline))
+                    stats["concept_stats"] = {
+                        "primary_vs_regular": {str(item["_id"]): item["count"] for item in primary_counts},
+                        "total": sum(item["count"] for item in primary_counts)
+                    }
+
+                    # Get document with most concepts
+                    doc_concept_pipeline = [
+                        {"$group": {"_id": "$pdf_id", "count": {"$sum": 1}}},
+                        {"$sort": {"count": -1}},
+                        {"$limit": 5}
+                    ]
+                    doc_concept_counts = list(self.db.concepts.aggregate(doc_concept_pipeline))
+                    stats["concept_stats"]["top_documents"] = {item["_id"]: item["count"] for item in doc_concept_counts}
+
+                except Exception as concept_err:
+                    stats["concept_stats"]["error"] = str(concept_err)
+
+            return stats
+
+        except Exception as e:
+            logger.error(f"Error getting MongoDB stats: {str(e)}")
+            return {"error": str(e)}
+
 # Singleton instance getter
 def get_mongo_store() -> MongoStore:
     """Get or create MongoDB store instance"""
