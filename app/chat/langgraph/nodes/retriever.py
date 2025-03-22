@@ -15,8 +15,6 @@ from app.chat.vector_stores import get_vector_store
 
 logger = logging.getLogger(__name__)
 
-# Update to app/chat/langgraph/nodes/retriever.py
-
 def retrieve_content(state: GraphState) -> GraphState:
     """
     Retrieve content based on query analysis.
@@ -51,8 +49,7 @@ def retrieve_content(state: GraphState) -> GraphState:
     procedure_focused = state.query_state.procedure_focused
     parameter_query = state.query_state.parameter_query
 
-    logger.info(f"Retrieval started: strategy={retrieval_strategy}, pdf_ids={pdf_ids}, "
-                f"chunk_level={preferred_chunk_level}, embedding_type={preferred_embedding_type}")
+    logger.info(f"Retrieval started: strategy={retrieval_strategy}, pdf_ids={pdf_ids}")
 
     try:
         # Validate PDF IDs with better error handling
@@ -86,35 +83,69 @@ def retrieve_content(state: GraphState) -> GraphState:
         elif parameter_query:
             content_types = ["parameter"]
 
-        # Get vector store instance with error handling
+        # IMPROVED ERROR HANDLING: Get vector store with robust validation
         try:
             vector_store = get_vector_store()
 
             # Check if vector store is initialized
             if not vector_store._initialized:
+                logger.warning("Vector store not initialized, attempting to initialize...")
                 success = vector_store.initialize()
+
                 if not success:
-                    raise Exception("Failed to initialize vector store")
+                    logger.error("Vector store initialization failed")
+                    state.retrieval_state = RetrievalState(
+                        elements=[],
+                        sources=[],
+                        metadata={"error": "Vector store initialization failed - check database connections"},
+                        strategies_used=[retrieval_strategy.value] if retrieval_strategy else [],
+                        chunk_levels_used=[],
+                        embedding_types_used=[]
+                    )
+                    return state
+
+            # CRITICAL FIX: Check which stores are actually available
+            mongo_available = (hasattr(vector_store, "mongo_store") and
+                              vector_store.mongo_store and
+                              getattr(vector_store.mongo_store, "_initialized", False))
+
+            qdrant_available = (hasattr(vector_store, "qdrant_store") and
+                               vector_store.qdrant_store and
+                               getattr(vector_store.qdrant_store, "_initialized", False))
+
+            # Log availability for debugging
+            logger.info(f"Database availability: MongoDB={mongo_available}, Qdrant={qdrant_available}")
+
+            # Adjust retrieval strategy based on available stores
+            if not qdrant_available and mongo_available:
+                logger.warning("Qdrant unavailable, forcing KEYWORD search strategy")
+                retrieval_strategy = RetrievalStrategy.KEYWORD
+            elif not mongo_available and qdrant_available:
+                logger.warning("MongoDB unavailable, forcing SEMANTIC search strategy")
+                retrieval_strategy = RetrievalStrategy.SEMANTIC
+            elif not mongo_available and not qdrant_available:
+                logger.error("No databases available for retrieval")
+                state.retrieval_state = RetrievalState(
+                    elements=[],
+                    sources=[],
+                    metadata={"error": "No databases available for retrieval"},
+                    strategies_used=[retrieval_strategy.value] if retrieval_strategy else ["none"],
+                    chunk_levels_used=[],
+                    embedding_types_used=[]
+                )
+                return state
+
         except Exception as vs_error:
-            logger.error(f"Vector store initialization error: {str(vs_error)}")
+            logger.error(f"Vector store error: {str(vs_error)}")
             state.retrieval_state = RetrievalState(
                 elements=[],
                 sources=[],
                 metadata={"error": f"Vector store error: {str(vs_error)}"},
-                strategies_used=[retrieval_strategy.value] if retrieval_strategy else [],
+                strategies_used=[],
                 chunk_levels_used=[],
                 embedding_types_used=[]
             )
             return state
-
-        # Determine if we're in research mode (multiple PDFs)
-        is_research_mode = len(pdf_ids) > 1
-
-        # Set up retrieval parameters
-        k = 10  # Standard number of results to return
-        if is_research_mode:
-            # In research mode, get fewer results per document
-            k = max(5, 20 // len(pdf_ids))
 
         # Execute retrieval based on strategy with retry mechanism
         all_results = []
@@ -141,8 +172,6 @@ def retrieve_content(state: GraphState) -> GraphState:
                             embedding_type=preferred_embedding_type
                         )
                         all_results.extend(results)
-
-                        # Track chunk levels and embedding types
                         for doc in results:
                             metadata = doc.metadata
                             if "chunk_level" in metadata:
@@ -158,8 +187,6 @@ def retrieve_content(state: GraphState) -> GraphState:
                             content_types=content_types,
                             limit=k
                         )
-
-                        # Convert to Document format for consistency
                         for result in results:
                             doc = Document(
                                 page_content=result.get("content", ""),
@@ -168,9 +195,7 @@ def retrieve_content(state: GraphState) -> GraphState:
                             all_results.append(doc)
 
                 elif retrieval_strategy == RetrievalStrategy.PROCEDURE:
-                    # For procedure search, first try to get procedure content
                     for pdf_id in pdf_ids:
-                        # Get procedure results from vector store
                         results = vector_store.semantic_search(
                             query=query,
                             k=k,
@@ -179,13 +204,9 @@ def retrieve_content(state: GraphState) -> GraphState:
                             embedding_type=EmbeddingType.TASK
                         )
                         all_results.extend(results)
-
-                        # Get procedure details from MongoDB
                         procedures = vector_store.get_procedures_by_pdf_id(pdf_id)
                         if procedures:
                             procedures_retrieved.extend(procedures)
-
-                            # Get related parameters for these procedures
                             for proc in procedures:
                                 proc_id = proc.get("procedure_id")
                                 if proc_id:
@@ -194,8 +215,6 @@ def retrieve_content(state: GraphState) -> GraphState:
                                         procedure_id=proc_id
                                     )
                                     parameters_retrieved.extend(params)
-
-                        # Track chunk levels and embedding types
                         for doc in results:
                             metadata = doc.metadata
                             if "chunk_level" in metadata:
@@ -203,7 +222,7 @@ def retrieve_content(state: GraphState) -> GraphState:
                             if "embedding_type" in metadata:
                                 embedding_types_used.add(metadata["embedding_type"])
 
-                    # If we don't have enough results, fall back to hybrid search
+                    # If results are low, try a hybrid search fallback
                     if len(all_results) < 3:
                         additional_results = []
                         for pdf_id in pdf_ids:
@@ -215,14 +234,10 @@ def retrieve_content(state: GraphState) -> GraphState:
                                 chunk_level=ChunkLevel.PROCEDURE
                             )
                             additional_results.extend(results)
-
-                        # Add any new results
                         existing_ids = set(doc.metadata.get("element_id") for doc in all_results)
                         for doc in additional_results:
                             if doc.metadata.get("element_id") not in existing_ids:
                                 all_results.append(doc)
-
-                                # Track additional chunk levels and embedding types
                                 metadata = doc.metadata
                                 if "chunk_level" in metadata:
                                     chunk_levels_used.add(metadata["chunk_level"])
@@ -233,14 +248,12 @@ def retrieve_content(state: GraphState) -> GraphState:
                     # Default to hybrid search
                     all_results = vector_store.hybrid_search(
                         query=query,
-                        k=k * len(pdf_ids),  # Get more results for hybrid search
+                        k=k * len(pdf_ids),  # More results for hybrid search
                         pdf_ids=pdf_ids,
                         content_types=content_types,
                         chunk_level=preferred_chunk_level,
                         embedding_type=preferred_embedding_type
                     )
-
-                    # Track chunk levels and embedding types from hybrid results
                     for doc in all_results:
                         metadata = doc.metadata
                         if "chunk_level" in metadata:
@@ -248,31 +261,26 @@ def retrieve_content(state: GraphState) -> GraphState:
                         if "embedding_type" in metadata:
                             embedding_types_used.add(metadata["embedding_type"])
 
-                # For parameter queries, fetch parameters directly
+                # For parameter queries, fetch parameters directly if not already retrieved
                 if parameter_query and not parameters_retrieved:
                     for pdf_id in pdf_ids:
                         params = vector_store.get_parameters_by_pdf_id(pdf_id)
                         parameters_retrieved.extend(params)
 
-                # If we got results, break retry loop
                 if all_results or procedures_retrieved or parameters_retrieved:
                     break
 
-                # If no results on first attempt, try broadening search on next attempt
+                # Broaden search on retry attempts
                 if retry_count == 0:
                     logger.warning(f"No results found, trying broader search (retry {retry_count+1})")
-                    # Remove content type filter
                     content_types = None
-                    # Try different chunk level
                     if preferred_chunk_level == ChunkLevel.STEP:
                         preferred_chunk_level = ChunkLevel.PROCEDURE
                     elif preferred_chunk_level == ChunkLevel.PROCEDURE:
                         preferred_chunk_level = ChunkLevel.SECTION
-                    # Try general embedding type
                     preferred_embedding_type = EmbeddingType.GENERAL
                 elif retry_count == 1:
                     logger.warning(f"Still no results, trying keyword fallback (retry {retry_count+1})")
-                    # Fall back to keyword search
                     retrieval_strategy = RetrievalStrategy.KEYWORD
 
                 retry_count += 1
@@ -280,21 +288,16 @@ def retrieve_content(state: GraphState) -> GraphState:
             except Exception as retrieval_error:
                 logger.error(f"Error in {retrieval_strategy} retrieval: {str(retrieval_error)}")
                 retry_count += 1
-
-                # If this is the last attempt, use keyword search as fallback
                 if retry_count == max_retries and not all_results:
                     logger.warning("Trying keyword search as final fallback")
                     try:
-                        # Use keyword search as last resort
                         for pdf_id in pdf_ids:
                             results = vector_store.mongo_store.keyword_search(
                                 query=query,
                                 pdf_id=pdf_id,
-                                content_types=None,  # No content type filter for broader results
+                                content_types=None,  # No filter for broader results
                                 limit=k
                             )
-
-                            # Convert to Document format
                             for result in results:
                                 doc = Document(
                                     page_content=result.get("content", ""),
@@ -304,11 +307,9 @@ def retrieve_content(state: GraphState) -> GraphState:
                     except Exception as keyword_error:
                         logger.error(f"Error in keyword fallback: {str(keyword_error)}")
 
-        # If we still have no results at all
+        # If no results at all, return a retrieval state with warning
         if not all_results and not procedures_retrieved and not parameters_retrieved:
             logger.warning(f"No results found for query: {query[:50]}...")
-
-            # Create minimal retrieval state with warning
             state.retrieval_state = RetrievalState(
                 elements=[],
                 sources=[],
@@ -326,26 +327,20 @@ def retrieve_content(state: GraphState) -> GraphState:
             )
             return state
 
-        # Sort results by score if we have multiple documents
+        # If in research mode, sort results by score
         if is_research_mode and len(all_results) > 0:
             all_results.sort(key=lambda x: x.metadata.get("score", 0), reverse=True)
 
         # Limit results
-        all_results = all_results[:15]  # Cap at 15 results total
+        all_results = all_results[:15]
 
-        # Transform results into standard format for LangGraph
+        # Transform results into a standard format for LangGraph
         elements = []
         sources = []
-
         for doc in all_results:
-            # Extract metadata
             metadata = doc.metadata
             doc_pdf_id = metadata.get("pdf_id", "")
-
-            # Determine content type
             content_type_str = metadata.get("content_type", "text")
-
-            # Create element dictionary for the GraphState
             element = {
                 "id": metadata.get("element_id", ""),
                 "element_id": metadata.get("element_id", ""),
@@ -362,10 +357,7 @@ def retrieve_content(state: GraphState) -> GraphState:
                     "embedding_type": metadata.get("embedding_type", "")
                 }
             }
-
             elements.append(element)
-
-            # Add to sources for citation tracking
             sources.append({
                 "id": metadata.get("element_id", ""),
                 "pdf_id": doc_pdf_id,
@@ -376,14 +368,13 @@ def retrieve_content(state: GraphState) -> GraphState:
                 "content_type": content_type_str
             })
 
-        # If we're in research mode, add cross-document information
+        # If in research mode, add cross-document information
         cross_document_info = {}
         if is_research_mode:
             shared_concepts = vector_store.find_shared_concepts(pdf_ids)
             if shared_concepts:
                 cross_document_info["shared_concepts"] = shared_concepts
 
-            # Get document titles
             document_titles = {}
             for pdf_id in pdf_ids:
                 doc_metadata = vector_store.get_document_metadata(pdf_id)
@@ -391,7 +382,6 @@ def retrieve_content(state: GraphState) -> GraphState:
                     document_titles[pdf_id] = doc_metadata.get("title", f"Document {pdf_id}")
                 else:
                     document_titles[pdf_id] = f"Document {pdf_id}"
-
             cross_document_info["document_titles"] = document_titles
 
         # Create retrieval state with enhanced metadata
@@ -418,13 +408,11 @@ def retrieve_content(state: GraphState) -> GraphState:
         )
 
         logger.info(f"Retrieval complete: found {len(elements)} elements, "
-                   f"{len(procedures_retrieved)} procedures, {len(parameters_retrieved)} parameters "
-                   f"with chunk levels {chunk_levels_used} and embedding types {embedding_types_used}")
+                    f"{len(procedures_retrieved)} procedures, {len(parameters_retrieved)} parameters "
+                    f"with chunk levels {chunk_levels_used} and embedding types {embedding_types_used}")
 
     except Exception as e:
         logger.error(f"Error in retrieval: {str(e)}", exc_info=True)
-
-        # Create a minimal retrieval state with error information
         state.retrieval_state = RetrievalState(
             elements=[],
             sources=[],

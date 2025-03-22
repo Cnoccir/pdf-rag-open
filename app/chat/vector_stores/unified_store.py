@@ -70,22 +70,65 @@ class UnifiedVectorStore:
         logger.info(f"Unified Vector Store initialized with {self.embedding_dimension} dimensions")
 
     def initialize(self) -> bool:
-        """Initialize both MongoDB and Qdrant stores."""
-        # Try initializing MongoDB if not already initialized
-        if not self.mongo_store._initialized:
-            if not self.mongo_store.initialize():
-                logger.error("Failed to initialize MongoDB store")
-                return False
+        """Initialize both MongoDB and Qdrant stores with improved error handling."""
+        # Skip if already completely initialized
+        if self._initialized and self.mongo_store._initialized and self.qdrant_store._initialized:
+            logger.info("Vector stores already fully initialized")
+            return True
 
-        # Try initializing Qdrant if not already initialized
-        if not self.qdrant_store._initialized:
-            if not self.qdrant_store.initialize():
-                logger.error("Failed to initialize Qdrant store")
-                return False
+        # Reset initialization metrics
+        mongo_success = False
+        qdrant_success = False
+        error_messages = []
 
-        # Mark as initialized
-        self._initialized = True
-        return True
+        # Try initializing MongoDB
+        try:
+            if not self.mongo_store._initialized:
+                logger.info("Initializing MongoDB store...")
+                mongo_success = self.mongo_store.initialize()
+
+                if not mongo_success:
+                    error_msg = f"MongoDB initialization failed: {self.mongo_store.error if hasattr(self.mongo_store, 'error') else 'Unknown error'}"
+                    logger.error(error_msg)
+                    error_messages.append(error_msg)
+            else:
+                logger.info("MongoDB store already initialized")
+                mongo_success = True
+        except Exception as e:
+            error_msg = f"MongoDB initialization error: {str(e)}"
+            logger.error(error_msg)
+            error_messages.append(error_msg)
+
+        # Try initializing Qdrant
+        try:
+            if not self.qdrant_store._initialized:
+                logger.info("Initializing Qdrant store...")
+                qdrant_success = self.qdrant_store.initialize()
+
+                if not qdrant_success:
+                    error_msg = f"Qdrant initialization failed: {self.qdrant_store.error if hasattr(self.qdrant_store, 'error') else 'Unknown error'}"
+                    logger.error(error_msg)
+                    error_messages.append(error_msg)
+            else:
+                logger.info("Qdrant store already initialized")
+                qdrant_success = True
+        except Exception as e:
+            error_msg = f"Qdrant initialization error: {str(e)}"
+            logger.error(error_msg)
+            error_messages.append(error_msg)
+
+        # CRITICAL FIX: Allow partial initialization
+        # Consider initialized if at least one store is available
+        self._initialized = mongo_success or qdrant_success
+
+        # Log detailed status
+        status_message = f"Vector stores initialization: MongoDB={mongo_success}, Qdrant={qdrant_success}, overall={self._initialized}"
+        if self._initialized:
+            logger.info(status_message)
+        else:
+            logger.error(f"{status_message}. Errors: {'; '.join(error_messages)}")
+
+        return self._initialized
 
     def create_document_node(
         self,

@@ -13,8 +13,6 @@ from app.chat.utils.extraction import extract_technical_terms
 
 logger = logging.getLogger(__name__)
 
-# Update to app/chat/langgraph/nodes/conversation_memory.py
-
 def process_conversation_memory(state: GraphState) -> GraphState:
     """
     Process conversation memory and extract technical concepts.
@@ -40,9 +38,9 @@ def process_conversation_memory(state: GraphState) -> GraphState:
     cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
     state.conversation_state.metadata["cycle_count"] = cycle_count + 1
 
-    logger.debug(f"Conversation memory cycle count: {cycle_count + 1}")
+    logger.info(f"Conversation memory cycle count: {cycle_count + 1}")
 
-    # If we've processed too many cycles, mark as complete to end graph
+    # CRITICAL FIX: Force end if we've cycled too many times
     if cycle_count > 3:
         state.conversation_state.metadata["processed_response"] = True
         logger.warning(f"Forcing end of processing after {cycle_count} cycles")
@@ -56,7 +54,11 @@ def process_conversation_memory(state: GraphState) -> GraphState:
         logger.info("Processing AI response and adding to conversation history")
 
         # Extract any additional technical terms from the AI response
-        response_terms = extract_technical_terms(state.generation_state.response)
+        response_terms = []
+        try:
+            response_terms = extract_technical_terms(state.generation_state.response)
+        except Exception as e:
+            logger.warning(f"Error extracting technical terms: {str(e)}")
 
         # Update the conversation state with these technical terms
         if response_terms:
@@ -105,7 +107,11 @@ def process_conversation_memory(state: GraphState) -> GraphState:
             logger.info("Added system message to conversation")
 
         # Extract technical terms from user query
-        technical_terms = extract_technical_terms(state.query_state.query)
+        technical_terms = []
+        try:
+            technical_terms = extract_technical_terms(state.query_state.query)
+        except Exception as e:
+            logger.warning(f"Error extracting technical terms from query: {str(e)}")
 
         # Update the conversation state with these technical terms
         if technical_terms:

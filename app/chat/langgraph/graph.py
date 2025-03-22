@@ -44,19 +44,28 @@ def create_query_graph() -> StateGraph:
 
     # Define conditional edge to end the graph
     def should_end(state: GraphState) -> str:
+        # Log state for debugging
+        if state.conversation_state and state.conversation_state.metadata:
+            cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
+            processed = state.conversation_state.metadata.get("processed_response", False)
+            logger.debug(f"Evaluating graph end condition: cycle_count={cycle_count}, processed_response={processed}")
+
         # If we have processed the response, end the graph
         if (state.generation_state and
             state.generation_state.response and
             state.conversation_state and
             state.conversation_state.metadata and
             state.conversation_state.metadata.get("processed_response", False)):
+            logger.info("Ending graph: response processed")
             return END
 
-        # Check if we've gone through too many cycles
+        # Safety check - if we've gone through too many cycles
         if state.conversation_state and state.conversation_state.metadata:
             cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
             if cycle_count > 3:
-                logger.warning(f"Ending graph after {cycle_count} cycles")
+                logger.warning(f"Ending graph after {cycle_count} cycles (safety limit)")
+                # Force processed flag before ending
+                state.conversation_state.metadata["processed_response"] = True
                 return END
 
         # Continue processing
@@ -64,7 +73,7 @@ def create_query_graph() -> StateGraph:
 
     graph.add_conditional_edges("conversation_memory", should_end)
 
-    # Compile the graph
+    # Compile the graph WITHOUT recursion_limit (which was causing the error)
     return graph.compile()
 
 def create_research_graph() -> StateGraph:
@@ -103,19 +112,28 @@ def create_research_graph() -> StateGraph:
 
     # Define conditional edge to end the graph
     def should_end(state: GraphState) -> str:
+        # Log state for debugging
+        if state.conversation_state and state.conversation_state.metadata:
+            cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
+            processed = state.conversation_state.metadata.get("processed_response", False)
+            logger.debug(f"Evaluating research graph end condition: cycle_count={cycle_count}, processed_response={processed}")
+
         # If we have processed the response, end the graph
         if (state.generation_state and
             state.generation_state.response and
             state.conversation_state and
             state.conversation_state.metadata and
             state.conversation_state.metadata.get("processed_response", False)):
+            logger.info("Ending research graph: response processed")
             return END
 
-        # Check if we've gone through too many cycles
+        # Safety check - if we've gone through too many cycles
         if state.conversation_state and state.conversation_state.metadata:
             cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
             if cycle_count > 3:
-                logger.warning(f"Ending graph after {cycle_count} cycles")
+                logger.warning(f"Ending research graph after {cycle_count} cycles (safety limit)")
+                # Force processed flag before ending
+                state.conversation_state.metadata["processed_response"] = True
                 return END
 
         # Continue processing
@@ -123,7 +141,7 @@ def create_research_graph() -> StateGraph:
 
     graph.add_conditional_edges("conversation_memory", should_end)
 
-    # Compile the graph
+    # Compile the graph WITHOUT recursion_limit
     return graph.compile()
 
 def create_document_graph() -> StateGraph:
