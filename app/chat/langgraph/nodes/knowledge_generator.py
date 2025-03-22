@@ -107,41 +107,49 @@ def generate_knowledge(state: GraphState) -> GraphState:
                 "cross_references": []
             }
 
-        # Create research context from synthesis
-        research_context = ResearchContext(
-            query=query,
-            summary=synthesis.get("summary", ""),
-            facts=synthesis.get("facts", []),
-            insights=synthesis.get("insights", []),
-            gaps=synthesis.get("gaps", []),
-            cross_references=synthesis.get("cross_references", []),
-            sources=[
-                {
-                    "id": source.get("id", ""),
-                    "title": source.get("title", ""),
-                    "pdf_id": source.get("pdf_id", "")
-                }
-                for source in state.retrieval_state.sources if source
-            ]
-        )
+        # Format cross_references properly for the research state
+        formatted_cross_references = []
+        for ref in synthesis.get("cross_references", []):
+            if isinstance(ref, str):
+                formatted_cross_references.append({"name": ref, "type": "concept"})
+            elif isinstance(ref, dict):
+                formatted_cross_references.append(ref)
 
-        # Create research state
+        # Store information in research state - don't create ResearchContext with attributes it doesn't have
         state.research_state = ResearchState(
             query_state=state.query_state,
-            research_context=research_context,
-            cross_references=synthesis.get("cross_references", []),
+            cross_references=formatted_cross_references,
             insights=synthesis.get("insights", []),
             metadata={
                 "synthesis": synthesis,
+                "summary": synthesis.get("summary", ""),
+                "facts": synthesis.get("facts", []),  # Store in metadata instead of ResearchContext
+                "gaps": synthesis.get("gaps", []),
                 "model": "gpt-4o-mini",
                 "element_count": len(state.retrieval_state.elements),
                 "generated_at": datetime.now().isoformat()
             }
         )
 
+        # Create an appropriate research context that matches its actual definition
+        from app.chat.models import ResearchContext
+        research_context = ResearchContext(primary_pdf_id=state.query_state.pdf_ids[0] if state.query_state.pdf_ids else None)
+
+        # Add active PDF IDs
+        if state.query_state.pdf_ids:
+            for pdf_id in state.query_state.pdf_ids:
+                research_context.add_document(pdf_id)
+
+        # Set the research context properly
+        state.research_state.research_context = research_context
+
+        # Access facts from metadata, not from research_context
+        facts_count = len(synthesis.get("facts", []))
+        insights_count = len(synthesis.get("insights", []))
+
         logger.info(
-            f"Knowledge synthesis complete with {len(research_context.facts)} facts "
-            f"and {len(research_context.insights)} insights"
+            f"Knowledge synthesis complete with {facts_count} facts "
+            f"and {insights_count} insights"
         )
 
         return state
@@ -152,7 +160,8 @@ def generate_knowledge(state: GraphState) -> GraphState:
         # Initialize basic research state in case of error
         state.research_state = ResearchState(
             query_state=state.query_state,
-            metadata={"error": str(e)}
+            metadata={"error": str(e)},
+            cross_references=[]  # Ensure this is a valid empty list
         )
 
         return state

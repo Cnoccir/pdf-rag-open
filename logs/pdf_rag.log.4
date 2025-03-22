@@ -1,87 +1,76 @@
-2025-03-16 22:51:05,825 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 22:52:03,532 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 22:53:49,047 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 22:59:00,706 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:04:22,476 INFO: Starting document processing for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:51]
-2025-03-16 23:04:23,136 WARNING: Vector store not fully initialized for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:72]
-2025-03-16 23:04:23,639 INFO: Successfully downloaded content for file: 3f59a542-3ee3-40c1-95e0-120144023794 with S3 key: 3f59a542-3ee3-40c1-95e0-120144023794.pdf [in C:\Users\tech\Projects\pdf_rag\app\web\files.py:133]
-2025-03-16 23:05:29,331 ERROR: Processing error for PDF 3f59a542-3ee3-40c1-95e0-120144023794: Document processing pipeline failed: name 'DOMAIN_SPECIFIC_TERMS' is not defined [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:113]
+2025-03-19 14:07:41,643 ERROR: Processing error for PDF 7648b2e9-8aa2-446d-aad9-cec615230c69: 'Neo4jVectorStore' object has no attribute 'initialized' [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:120]
 Traceback (most recent call last):
-  File "C:\Users\tech\Projects\pdf_rag\app\chat\document_fetcher.py", line 1680, in process_technical_document
-    result = await processor.process_document()
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\tech\Projects\pdf_rag\app\chat\document_fetcher.py", line 163, in process_document
-    document_summary = await generate_document_summary(
-                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\tech\Projects\pdf_rag\app\chat\utils\document.py", line 117, in generate_document_summary
-    for category, domain_terms in DOMAIN_SPECIFIC_TERMS.items():
-                                  ^^^^^^^^^^^^^^^^^^^^^
-NameError: name 'DOMAIN_SPECIFIC_TERMS' is not defined
-
-During handling of the above exception, another exception occurred:
-
+  File "C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py", line 63, in async_process
+    if not vector_store.initialized:
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'Neo4jVectorStore' object has no attribute 'initialized'. Did you mean: '_initialized'?
+2025-03-19 14:07:41,666 INFO: Updated error status for 7648b2e9-8aa2-446d-aad9-cec615230c69 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:132]
+2025-03-19 14:08:19,293 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 14:08:19,301 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 14:08:19,301 INFO: ContentElement validation: False [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 14:14:30,896 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 14:14:30,906 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 14:14:30,906 INFO: ContentElement validation: False [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 14:14:58,837 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 14:14:58,845 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 14:14:58,846 INFO: ContentElement validation: False [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 14:17:17,870 INFO: Starting document processing for 7648b2e9-8aa2-446d-aad9-cec615230c69 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:51]
+2025-03-19 14:17:18,537 ERROR: Processing error for PDF 7648b2e9-8aa2-446d-aad9-cec615230c69: 'Neo4jVectorStore' object has no attribute 'initialize_database' [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:120]
 Traceback (most recent call last):
-  File "C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py", line 75, in async_process
-    result = await process_technical_document(
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\tech\Projects\pdf_rag\app\chat\document_fetcher.py", line 1732, in process_technical_document
-    raise DocumentProcessingError(f"Document processing pipeline failed: {e}")
-app.chat.errors.DocumentProcessingError: Document processing pipeline failed: name 'DOMAIN_SPECIFIC_TERMS' is not defined
-2025-03-16 23:05:29,337 INFO: Updated error status for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:125]
-2025-03-16 23:08:14,105 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:08:58,493 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:11:07,009 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:11:52,042 INFO: Starting document processing for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:51]
-2025-03-16 23:11:52,710 WARNING: Vector store not fully initialized for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:72]
-2025-03-16 23:11:53,240 INFO: Successfully downloaded content for file: 3f59a542-3ee3-40c1-95e0-120144023794 with S3 key: 3f59a542-3ee3-40c1-95e0-120144023794.pdf [in C:\Users\tech\Projects\pdf_rag\app\web\files.py:133]
-2025-03-16 23:13:07,863 ERROR: Processing error for PDF 3f59a542-3ee3-40c1-95e0-120144023794: Object of type DocumentSummary is not JSON serializable [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:113]
-Traceback (most recent call last):
-  File "C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py", line 94, in async_process
-    pdf.update_metadata({
-  File "C:\Users\tech\Projects\pdf_rag\app\web\db\models\pdf.py", line 53, in update_metadata
-    self.document_meta = json.dumps(current)
-                         ^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\tech\AppData\Local\Programs\Python\Python312\Lib\json\__init__.py", line 231, in dumps
-    return _default_encoder.encode(obj)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\tech\AppData\Local\Programs\Python\Python312\Lib\json\encoder.py", line 200, in encode
-    chunks = self.iterencode(o, _one_shot=True)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\tech\AppData\Local\Programs\Python\Python312\Lib\json\encoder.py", line 258, in iterencode
-    return _iterencode(o, 0)
-           ^^^^^^^^^^^^^^^^^
-  File "C:\Users\tech\AppData\Local\Programs\Python\Python312\Lib\json\encoder.py", line 180, in default
-    raise TypeError(f'Object of type {o.__class__.__name__} '
-TypeError: Object of type DocumentSummary is not JSON serializable
-2025-03-16 23:13:07,889 INFO: Updated error status for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:125]
-2025-03-16 23:16:37,558 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:17:54,830 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:19:20,040 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:21:40,349 INFO: Starting document processing for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:51]
-2025-03-16 23:21:41,013 WARNING: Vector store not fully initialized for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:72]
-2025-03-16 23:21:41,779 INFO: Successfully downloaded content for file: 3f59a542-3ee3-40c1-95e0-120144023794 with S3 key: 3f59a542-3ee3-40c1-95e0-120144023794.pdf [in C:\Users\tech\Projects\pdf_rag\app\web\files.py:133]
-2025-03-16 23:22:52,344 INFO: Successfully processed document 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:110]
-2025-03-16 23:30:20,813 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:37:24,100 INFO: Starting document processing for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:51]
-2025-03-16 23:37:24,822 WARNING: Vector store not fully initialized for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:72]
-2025-03-16 23:37:25,580 INFO: Successfully downloaded content for file: 3f59a542-3ee3-40c1-95e0-120144023794 with S3 key: 3f59a542-3ee3-40c1-95e0-120144023794.pdf [in C:\Users\tech\Projects\pdf_rag\app\web\files.py:133]
-2025-03-16 23:38:38,634 INFO: Successfully processed document 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:110]
-2025-03-16 23:39:32,995 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:43:05,148 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:44:24,323 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:44:40,938 INFO: Starting document processing for 1a8a3257-b0f8-4380-bc14-7aeaab89ec5c [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:51]
-2025-03-16 23:44:41,587 WARNING: Vector store not fully initialized for 1a8a3257-b0f8-4380-bc14-7aeaab89ec5c [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:72]
-2025-03-16 23:44:42,183 INFO: Successfully downloaded content for file: 1a8a3257-b0f8-4380-bc14-7aeaab89ec5c with S3 key: 1a8a3257-b0f8-4380-bc14-7aeaab89ec5c.pdf [in C:\Users\tech\Projects\pdf_rag\app\web\files.py:133]
-2025-03-16 23:45:30,812 INFO: Successfully processed document 1a8a3257-b0f8-4380-bc14-7aeaab89ec5c [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:110]
-2025-03-16 23:48:34,332 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:48:37,042 INFO: Starting document processing for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:51]
-2025-03-16 23:48:37,710 WARNING: Vector store not fully initialized for 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:72]
-2025-03-16 23:48:38,468 INFO: Successfully downloaded content for file: 3f59a542-3ee3-40c1-95e0-120144023794 with S3 key: 3f59a542-3ee3-40c1-95e0-120144023794.pdf [in C:\Users\tech\Projects\pdf_rag\app\web\files.py:133]
-2025-03-16 23:49:56,329 INFO: Successfully processed document 3f59a542-3ee3-40c1-95e0-120144023794 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:110]
-2025-03-16 23:50:56,740 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-16 23:51:24,473 INFO: Starting document processing for 1a8a3257-b0f8-4380-bc14-7aeaab89ec5c [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:51]
-2025-03-16 23:51:25,144 WARNING: Vector store not fully initialized for 1a8a3257-b0f8-4380-bc14-7aeaab89ec5c [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:72]
-2025-03-16 23:51:25,817 INFO: Successfully downloaded content for file: 1a8a3257-b0f8-4380-bc14-7aeaab89ec5c with S3 key: 1a8a3257-b0f8-4380-bc14-7aeaab89ec5c.pdf [in C:\Users\tech\Projects\pdf_rag\app\web\files.py:133]
-2025-03-16 23:52:16,068 INFO: Successfully processed document 1a8a3257-b0f8-4380-bc14-7aeaab89ec5c [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:110]
-2025-03-16 23:54:35,734 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
-2025-03-17 00:00:29,236 INFO: PDF RAG application startup [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:94]
+  File "C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py", line 68, in async_process
+    db_initialized = await vector_store.initialize_database()
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'Neo4jVectorStore' object has no attribute 'initialize_database'
+2025-03-19 14:17:18,554 INFO: Updated error status for 7648b2e9-8aa2-446d-aad9-cec615230c69 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:132]
+2025-03-19 14:19:29,338 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 14:19:29,348 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 14:19:29,350 INFO: ContentElement validation: False [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 14:20:21,066 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 14:20:21,075 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 14:20:21,076 INFO: ContentElement validation: False [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 14:25:00,237 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 14:25:00,245 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 14:25:00,246 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 14:25:17,552 INFO: Starting document processing for 7648b2e9-8aa2-446d-aad9-cec615230c69 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:51]
+2025-03-19 14:25:18,202 INFO: Neo4j vector store ready for document processing [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:107]
+2025-03-19 14:25:18,655 INFO: Successfully downloaded content for file: 7648b2e9-8aa2-446d-aad9-cec615230c69 with S3 key: 7648b2e9-8aa2-446d-aad9-cec615230c69.pdf [in C:\Users\tech\Projects\pdf_rag\app\web\files.py:133]
+2025-03-19 14:25:32,002 INFO: Successfully processed document 7648b2e9-8aa2-446d-aad9-cec615230c69 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:145]
+2025-03-19 14:38:21,985 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 14:38:21,995 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 14:38:21,996 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 14:49:35,085 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 14:49:35,102 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 14:49:35,103 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 14:51:00,637 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 14:51:00,646 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 14:51:00,646 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 14:51:12,051 INFO: Starting document processing for 7648b2e9-8aa2-446d-aad9-cec615230c69 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:51]
+2025-03-19 14:51:12,831 INFO: Neo4j vector store ready for document processing [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:107]
+2025-03-19 14:51:13,340 INFO: Successfully downloaded content for file: 7648b2e9-8aa2-446d-aad9-cec615230c69 with S3 key: 7648b2e9-8aa2-446d-aad9-cec615230c69.pdf [in C:\Users\tech\Projects\pdf_rag\app\web\files.py:133]
+2025-03-19 14:51:46,256 INFO: Successfully processed document 7648b2e9-8aa2-446d-aad9-cec615230c69 [in C:\Users\tech\Projects\pdf_rag\app\web\tasks\embeddings.py:145]
+2025-03-19 14:55:34,600 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 14:55:34,610 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 14:55:34,611 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 16:54:37,603 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 16:54:37,623 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 16:54:37,624 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 22:59:40,919 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 22:59:40,936 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 22:59:40,937 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-19 23:37:24,614 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-19 23:37:24,622 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-19 23:37:24,623 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-20 06:20:43,905 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-20 06:20:43,915 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-20 06:20:43,915 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-20 10:36:13,933 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-20 10:36:13,944 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-20 10:36:13,944 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-20 10:39:33,581 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-20 10:39:33,590 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-20 10:39:33,590 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-20 10:39:43,987 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-20 10:39:44,004 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]
+2025-03-20 10:39:44,005 INFO: ContentElement validation: True [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:95]
+2025-03-20 10:40:02,800 INFO: PDF RAG application startup with LangGraph integration [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:123]
+2025-03-20 10:40:02,809 INFO: PDF RAG application started with async support [in C:\Users\tech\Projects\pdf_rag\app\web\__init__.py:89]

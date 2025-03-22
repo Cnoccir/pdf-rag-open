@@ -181,56 +181,54 @@ class UnifiedVectorStore:
         # Forward to MongoDB store
         return self.mongo_store.add_section_concept_relation(section, concept, pdf_id)
 
-# Fix in UnifiedVectorStore methods that interact with MongoDB
+    def add_procedure(self, procedure: Dict[str, Any], pdf_id: str) -> bool:
+        """Add a procedure to MongoDB."""
+        try:
+            # Create procedure document
+            procedure_doc = {
+                "procedure_id": procedure.get("procedure_id", f"proc_{pdf_id}_{uuid.uuid4().hex[:8]}"),
+                "pdf_id": pdf_id,
+                "title": procedure.get("title", "Untitled Procedure"),
+                "content": procedure.get("content", ""),
+                "page": procedure.get("page", 0),
+                "steps": procedure.get("steps", []),
+                "parameters": procedure.get("parameters", []),
+                "section_headers": procedure.get("section_headers", []),
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
 
-def add_procedure(self, procedure: Dict[str, Any], pdf_id: str) -> bool:
-    """Add a procedure to MongoDB."""
-    try:
-        # Create procedure document
-        procedure_doc = {
-            "procedure_id": procedure.get("procedure_id", f"proc_{pdf_id}_{uuid.uuid4().hex[:8]}"),
-            "pdf_id": pdf_id,
-            "title": procedure.get("title", "Untitled Procedure"),
-            "content": procedure.get("content", ""),
-            "page": procedure.get("page", 0),
-            "steps": procedure.get("steps", []),
-            "parameters": procedure.get("parameters", []),
-            "section_headers": procedure.get("section_headers", []),
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow()
-        }
+            # Check if mongo_store exists, has db attribute, and db is not None
+            if not hasattr(self, "mongo_store"):
+                logger.error("mongo_store attribute not found")
+                return False
 
-        # Check if mongo_store exists, has db attribute, and db is not None
-        if not hasattr(self, "mongo_store"):
-            logger.error("mongo_store attribute not found")
+            if self.mongo_store is None:
+                logger.error("mongo_store is None")
+                return False
+
+            if not hasattr(self.mongo_store, "db"):
+                logger.error("mongo_store.db attribute not found")
+                return False
+
+            if self.mongo_store.db is None:
+                logger.error("mongo_store.db is None")
+                return False
+
+            if not hasattr(self.mongo_store.db, "procedures"):
+                logger.error("procedures collection not found in database")
+                return False
+
+            # Now we can safely access the procedures collection
+            result = self.mongo_store.db.procedures.update_one(
+                {"procedure_id": procedure_doc["procedure_id"]},
+                {"$set": procedure_doc},
+                upsert=True
+            )
+            return result.acknowledged
+        except Exception as e:
+            logger.error(f"Error adding procedure: {str(e)}")
             return False
-
-        if self.mongo_store is None:
-            logger.error("mongo_store is None")
-            return False
-
-        if not hasattr(self.mongo_store, "db"):
-            logger.error("mongo_store.db attribute not found")
-            return False
-
-        if self.mongo_store.db is None:
-            logger.error("mongo_store.db is None")
-            return False
-
-        if not hasattr(self.mongo_store.db, "procedures"):
-            logger.error("procedures collection not found in database")
-            return False
-
-        # Now we can safely access the procedures collection
-        result = self.mongo_store.db.procedures.update_one(
-            {"procedure_id": procedure_doc["procedure_id"]},
-            {"$set": procedure_doc},
-            upsert=True
-        )
-        return result.acknowledged
-    except Exception as e:
-        logger.error(f"Error adding procedure: {str(e)}")
-        return False
 
     def add_parameter(self, parameter: Dict[str, Any], pdf_id: str) -> bool:
         """Add a parameter to MongoDB."""
@@ -278,44 +276,6 @@ def add_procedure(self, procedure: Dict[str, Any], pdf_id: str) -> bool:
                 upsert=True
             )
             return result.acknowledged
-        except Exception as e:
-            logger.error(f"Error adding parameter: {str(e)}")
-            return False
-
-    def add_parameter(
-        self,
-        parameter: Dict[str, Any],
-        pdf_id: str
-    ) -> bool:
-        """Add a parameter to MongoDB."""
-        try:
-            # Create parameter document
-            parameter_doc = {
-                "parameter_id": parameter.get("parameter_id", f"param_{pdf_id}_{uuid.uuid4().hex[:8]}"),
-                "pdf_id": pdf_id,
-                "name": parameter.get("name", ""),
-                "value": parameter.get("value", ""),
-                "type": parameter.get("type", ""),
-                "description": parameter.get("description", ""),
-                "procedure_id": parameter.get("procedure_id", None),
-                "section_headers": parameter.get("section_headers", []),
-                "page": parameter.get("page", 0),
-                "created_at": datetime.utcnow(),
-                "updated_at": datetime.utcnow()
-            }
-
-            # Fix: Use explicit None comparison
-            if (hasattr(self.mongo_store, "db") and
-                self.mongo_store.db is not None and
-                hasattr(self.mongo_store.db, "parameters")):
-
-                result = self.mongo_store.db.parameters.update_one(
-                    {"parameter_id": parameter_doc["parameter_id"]},
-                    {"$set": parameter_doc},
-                    upsert=True
-                )
-                return result.acknowledged
-            return False
         except Exception as e:
             logger.error(f"Error adding parameter: {str(e)}")
             return False
@@ -514,29 +474,17 @@ def add_procedure(self, procedure: Dict[str, Any], pdf_id: str) -> bool:
                 )
 
                 # Perform keyword search
-                keyword_results = self.mongo_store.keyword_search(
+                keyword_results = self.keyword_search(
                     query=query,
+                    k=k//2,  # Use fewer keyword results
                     pdf_id=pdf_id,
-                    content_types=content_types,
-                    limit=k//2  # Use fewer keyword results
+                    content_types=content_types
                 )
-
-                # Convert keyword results to Document objects
-                keyword_docs = []
-                for result in keyword_results:
-                    metadata = {k: v for k, v in result.items() if k != "content"}
-                    metadata["source"] = "keyword_search"
-
-                    doc = Document(
-                        page_content=result.get("content", ""),
-                        metadata=metadata
-                    )
-                    keyword_docs.append(doc)
 
                 # Combine results for this PDF ID
                 pdf_results = self._combine_search_results(
                     semantic_results,
-                    keyword_docs,
+                    keyword_results,
                     k
                 )
 
@@ -778,8 +726,10 @@ def add_procedure(self, procedure: Dict[str, Any], pdf_id: str) -> bool:
 
     def check_health(self) -> Dict[str, Any]:
         """
-        Synchronous version of health check for compatibility.
-        Returns health status information for the unified store.
+        Check health status of the vector store.
+
+        Returns:
+            Dictionary with health status information
         """
         health_info = {
             "status": "error",
@@ -789,7 +739,7 @@ def add_procedure(self, procedure: Dict[str, Any], pdf_id: str) -> bool:
         }
 
         if not self._initialized:
-            health_info["error"] = "Unified store not initialized"
+            health_info["error"] = "Vector store not initialized"
             return health_info
 
         try:

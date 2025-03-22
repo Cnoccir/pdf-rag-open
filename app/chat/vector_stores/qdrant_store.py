@@ -363,12 +363,14 @@ class QdrantStore:
             logger.debug(f"Qdrant search filter: {filter_condition}")
 
             # Execute search
+            # FIXED: Pass the filter using filter_selector parameter, not filter parameter
             search_result = self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
                 limit=k,
                 with_payload=True,
-                filter=filter_condition
+                # Changed from filter=filter_condition to using query_filter
+                query_filter=filter_condition  # This is the correct parameter name
             )
 
             # Convert to Document objects
