@@ -93,7 +93,7 @@ For each key point, indicate which document(s) the information comes from.
 If documents contradict each other, present both perspectives fairly.
 """
 
-def generate_response(state: GraphState) -> GraphState:
+def generate_response(state: GraphState) -> dict:
     """
     Generate the final response based on retrieved content and knowledge synthesis.
     Enhanced to handle multi-level chunks and procedure-specific results.
@@ -103,7 +103,7 @@ def generate_response(state: GraphState) -> GraphState:
         state: Current graph state containing retrieval results and knowledge synthesis
 
     Returns:
-        Updated graph state with generated response
+        Dictionary with updated generation_state and conversation_state
     """
     # Validate required states
     if not state.retrieval_state or not state.query_state:
@@ -115,7 +115,7 @@ def generate_response(state: GraphState) -> GraphState:
             citations=[],
             metadata={"error": error_msg}
         )
-        return state
+        return {"generation_state": state.generation_state}
 
     # Check if we have elements to work with
     has_elements = state.retrieval_state.elements and len(state.retrieval_state.elements) > 0
@@ -143,7 +143,7 @@ def generate_response(state: GraphState) -> GraphState:
             citations=[],
             metadata={"fallback": True, "reason": "no_results"}
         )
-        return state
+        return {"generation_state": state.generation_state}
 
     logger.info(f"Generating response for query: {state.query_state.query[:50]}...")
 
@@ -255,7 +255,7 @@ def generate_response(state: GraphState) -> GraphState:
             f"{response.usage.total_tokens} total tokens"
         )
 
-        return state
+        return {"generation_state": state.generation_state, "conversation_state": state.conversation_state}
 
     except Exception as e:
         logger.error(f"Response generation failed: {str(e)}", exc_info=True)
@@ -275,7 +275,7 @@ def generate_response(state: GraphState) -> GraphState:
             state.conversation_state.metadata["processed_response"] = True
             state.conversation_state.metadata["error"] = str(e)
 
-        return state
+        return {"generation_state": state.generation_state, "conversation_state": state.conversation_state}
 
     except Exception as e:
         logger.error(f"Response generation failed: {str(e)}", exc_info=True)
@@ -295,9 +295,9 @@ def generate_response(state: GraphState) -> GraphState:
             state.conversation_state.metadata["processed_response"] = True
             state.conversation_state.metadata["error"] = str(e)
 
-        return state
+        return {"generation_state": state.generation_state, "conversation_state": state.conversation_state}
 
-def generate_procedure_response(state: GraphState) -> GraphState:
+def generate_procedure_response(state: GraphState) -> dict:
     """
     Generate a procedure-focused response based on the retrieved procedures.
 
@@ -305,7 +305,7 @@ def generate_procedure_response(state: GraphState) -> GraphState:
         state: Current graph state containing retrieval results
 
     Returns:
-        Updated graph state with generated procedure response
+        Dictionary with updated generation_state and conversation_state
     """
     try:
         # Get procedure results and parameter results
@@ -419,12 +419,17 @@ def generate_procedure_response(state: GraphState) -> GraphState:
             procedure_steps=procedure_steps
         )
 
+        # CRITICAL FIX: Mark response as processed to signal completion
+        if state.conversation_state and state.conversation_state.metadata:
+            state.conversation_state.metadata["processed_response"] = True
+            state.conversation_state.metadata["completed_at"] = datetime.now().isoformat()
+
         logger.info(
             f"Procedure response generation complete with {len(citations)} citations, "
             f"{response.usage.total_tokens} total tokens"
         )
 
-        return state
+        return {"generation_state": state.generation_state, "conversation_state": state.conversation_state}
 
     except Exception as e:
         logger.error(f"Procedure response generation failed: {str(e)}", exc_info=True)
@@ -439,7 +444,12 @@ def generate_procedure_response(state: GraphState) -> GraphState:
             metadata={"error": str(e)}
         )
 
-        return state
+        # IMPORTANT: Mark as processed even for errors to avoid infinite loops
+        if state.conversation_state and state.conversation_state.metadata:
+            state.conversation_state.metadata["processed_response"] = True
+            state.conversation_state.metadata["error"] = str(e)
+
+        return {"generation_state": state.generation_state, "conversation_state": state.conversation_state}
 
 def format_retrieved_content(elements: List[Dict[str, Any]]) -> tuple:
     """

@@ -13,7 +13,7 @@ from app.chat.vector_stores import get_vector_store
 
 logger = logging.getLogger(__name__)
 
-def synthesize_research(state: GraphState) -> GraphState:
+def synthesize_research(state: GraphState) -> dict:
     """
     Synthesize research from multiple documents.
     Identifies connections between documents and extracts insights.
@@ -23,12 +23,17 @@ def synthesize_research(state: GraphState) -> GraphState:
         state: Current graph state
 
     Returns:
-        Updated graph state with research synthesis
+        Dictionary with updated research_state
     """
     # Skip if no query state or retrieval state
     if not state.query_state or not state.retrieval_state:
         logger.warning("Missing query state or retrieval state, skipping research synthesis")
-        return state
+        if not state.research_state:
+            state.research_state = ResearchState(
+                query_state=state.query_state,
+                insights=["Research mode requires multiple documents for cross-document analysis."]
+            )
+        return {"research_state": state.research_state}
 
     # Get the PDF IDs to analyze
     pdf_ids = state.query_state.pdf_ids
@@ -48,7 +53,7 @@ def synthesize_research(state: GraphState) -> GraphState:
                 query_state=state.query_state,
                 insights=["Research mode requires multiple documents for cross-document analysis."]
             )
-        return state
+        return {"research_state": state.research_state}
 
     logger.info(f"Performing research synthesis across {len(pdf_ids)} documents")
 
@@ -137,7 +142,7 @@ def synthesize_research(state: GraphState) -> GraphState:
 
         logger.info(f"Research synthesis complete with {len(state.research_state.insights)} insights")
 
-        return state
+        return {"research_state": state.research_state}
 
     except Exception as e:
         logger.error(f"Error in research synthesis: {str(e)}", exc_info=True)
@@ -150,7 +155,7 @@ def synthesize_research(state: GraphState) -> GraphState:
                 metadata={"error": str(e)}
             )
 
-        return state
+        return {"research_state": state.research_state}
 
 def generate_cross_document_insights(
     pdf_ids: List[str],

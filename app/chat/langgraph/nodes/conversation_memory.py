@@ -13,9 +13,7 @@ from app.chat.utils.extraction import extract_technical_terms
 
 logger = logging.getLogger(__name__)
 
-# app/chat/langgraph/nodes/conversation_memory.py - Improved cycle tracking
-
-def process_conversation_memory(state: GraphState) -> GraphState:
+def process_conversation_memory(state: GraphState) -> dict:
     """
     Process conversation memory and extract technical concepts.
     Maintains conversation context and tracks message history.
@@ -24,7 +22,7 @@ def process_conversation_memory(state: GraphState) -> GraphState:
         state: Current graph state
 
     Returns:
-        Updated graph state with conversation memory
+        Dictionary with updated conversation_state
     """
     # Initialize conversation state if not present
     if not state.conversation_state:
@@ -48,7 +46,7 @@ def process_conversation_memory(state: GraphState) -> GraphState:
     if cycle_count > 10:
         state.conversation_state.metadata["processed_response"] = True
         logger.warning(f"Forcing end of processing after {cycle_count} cycles")
-        return state
+        return {"conversation_state": state.conversation_state}
 
     # Check if we have a generation_state with response but haven't processed it yet
     has_generation = (state.generation_state and state.generation_state.response)
@@ -94,7 +92,7 @@ def process_conversation_memory(state: GraphState) -> GraphState:
 
         logger.info(f"Added AI response to conversation history with {len(response_terms)} technical terms")
         logger.debug(f"Set processed_response flag to TRUE")
-        return state
+        return {"conversation_state": state.conversation_state}
 
     # Process query state if not already done
     if not already_processed and state.query_state and state.query_state.query:
@@ -146,4 +144,4 @@ def process_conversation_memory(state: GraphState) -> GraphState:
     # Store conversation update timestamp
     state.conversation_state.updated_at = datetime.now()
 
-    return state
+    return {"conversation_state": state.conversation_state}

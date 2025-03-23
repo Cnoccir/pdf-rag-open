@@ -15,9 +15,15 @@ from app.chat.document_fetcher import process_technical_document
 
 logger = logging.getLogger(__name__)
 
-def process_document(state: GraphState) -> GraphState:
+def process_document(state: GraphState) -> dict:
     """
     Process a document and extract content for unified vector store.
+
+    Args:
+        state: Current graph state
+
+    Returns:
+        Dictionary with updated document_state
     """
     # Validate state
     if not state.document_state or "pdf_id" not in state.document_state:
@@ -26,7 +32,7 @@ def process_document(state: GraphState) -> GraphState:
             state.document_state = {"error": "Missing document state"}
         else:
             state.document_state["error"] = "Missing pdf_id in document state"
-        return state
+        return {"document_state": state.document_state}
 
     # Get PDF ID
     pdf_id = state.document_state["pdf_id"]
@@ -153,7 +159,7 @@ def process_document(state: GraphState) -> GraphState:
             }
 
         logger.info(f"Document processing complete: {pdf_id}")
-        return state
+        return {"document_state": state.document_state}
 
     except Exception as e:
         logger.error(f"Document processing failed: {str(e)}", exc_info=True)
@@ -163,7 +169,7 @@ def process_document(state: GraphState) -> GraphState:
         state.document_state["error"] = str(e)
         state.document_state["processing_time"] = datetime.now().isoformat()
 
-        return state
+        return {"document_state": state.document_state}
 
 def _predict_category_from_concepts(concepts: list) -> str:
     """

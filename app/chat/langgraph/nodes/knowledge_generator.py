@@ -40,7 +40,7 @@ Format your response as a JSON object with these keys:
 - cross_references: List of related concepts worth exploring (0-3 items, if any)
 """
 
-def generate_knowledge(state: GraphState) -> GraphState:
+def generate_knowledge(state: GraphState) -> dict:
     """
     Generate synthesized knowledge from retrieved content.
     Simplified implementation without async/await.
@@ -49,19 +49,19 @@ def generate_knowledge(state: GraphState) -> GraphState:
         state: Current graph state
 
     Returns:
-        Updated graph state with knowledge synthesis
+        Dictionary with updated state components
     """
     # Check required states
     if not state.retrieval_state or not state.query_state:
         logger.warning("Missing retrieval or query state, skipping knowledge generation")
         state.research_state = ResearchState(query_state=state.query_state) if state.query_state else None
-        return state
+        return {"research_state": state.research_state}
 
     # Check if we have retrieval elements
     if not state.retrieval_state.elements:
         logger.warning("No elements retrieved, skipping knowledge generation")
         state.research_state = ResearchState(query_state=state.query_state)
-        return state
+        return {"research_state": state.research_state}
 
     query = state.query_state.query
     logger.info(f"Generating knowledge synthesis for query: {query[:50]}...")
@@ -152,7 +152,7 @@ def generate_knowledge(state: GraphState) -> GraphState:
             f"and {insights_count} insights"
         )
 
-        return state
+        return {"research_state": state.research_state}
 
     except Exception as e:
         logger.error(f"Knowledge generation failed: {str(e)}", exc_info=True)
@@ -164,4 +164,4 @@ def generate_knowledge(state: GraphState) -> GraphState:
             cross_references=[]  # Ensure this is a valid empty list
         )
 
-        return state
+        return {"research_state": state.research_state}

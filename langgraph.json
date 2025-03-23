@@ -18,9 +18,5 @@
     "research_graph": "./app/chat/langgraph/graph.py:create_research_graph",
     "document_graph": "./app/chat/langgraph/graph.py:create_document_graph"
   },
-  "env": {
-    "_inherit": true,
-    "_exclude": ["REDIS_URI"]
-  },
   "python_version": "3.12"
 }

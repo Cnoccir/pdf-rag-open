@@ -45,39 +45,53 @@ def create_query_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:
     graph.add_edge("knowledge_generator", "response_generator")
     graph.add_edge("response_generator", "conversation_memory")
 
-    # Define conditional edge to end the graph
+    # Define conditional edge to end the graph - THIS NEEDS FIXING
     def should_end(state: GraphState) -> str:
-        # Log state for debugging
-        if state.conversation_state and state.conversation_state.metadata:
+        # CRITICAL FIX: More explicit logging
+        logger.info(f"Evaluating should_end condition in query graph")
+
+        # If there's no conversation state, continue to query analyzer
+        if not state.conversation_state:
+            logger.info("No conversation state, continuing to query_analyzer")
+            return "query_analyzer"
+
+        # Log the critical values we're checking
+        if state.conversation_state.metadata:
             cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
             processed = state.conversation_state.metadata.get("processed_response", False)
-            logger.debug(f"Evaluating graph end condition: cycle_count={cycle_count}, processed_response={processed}")
+            logger.info(f"Current cycle_count={cycle_count}, processed_response={processed}")
 
-        # If we have processed the response, end the graph
-        if (state.generation_state and
-            state.generation_state.response and
-            state.conversation_state and
-            state.conversation_state.metadata and
-            state.conversation_state.metadata.get("processed_response", False)):
-            logger.info("Ending graph: response processed")
+        # CRITICAL FIX: Check generation state first - if response exists, end immediately
+        if state.generation_state and state.generation_state.response:
+            logger.info("Response generated, ending graph")
             return END
 
-        # Safety check - if we've gone through too many cycles
-        if state.conversation_state and state.conversation_state.metadata:
-            cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
-            # Increase the safety limit from 3 to 10 for more headroom
-            if cycle_count > 10:
-                logger.warning(f"Ending graph after {cycle_count} cycles (safety limit)")
-                # Force processed flag before ending
-                state.conversation_state.metadata["processed_response"] = True
-                return END
+        # If response is processed according to metadata, end
+        if (state.conversation_state and
+            state.conversation_state.metadata and
+            state.conversation_state.metadata.get("processed_response", False)):
+            logger.info("Response processed flag is True, ending graph")
+            return END
+
+        # CRITICAL SAFETY: Force end after cycle limit regardless of other conditions
+        if (state.conversation_state and
+            state.conversation_state.metadata and
+            state.conversation_state.metadata.get("cycle_count", 0) >= 5):  # REDUCED FROM 10 TO 5
+            logger.warning(f"Forcing end after {state.conversation_state.metadata.get('cycle_count')} cycles (safety limit)")
+            return END
 
         # Continue processing
+        logger.info("Continuing to query_analyzer")
         return "query_analyzer"
 
-    graph.add_conditional_edges("conversation_memory", should_end)
+    # Critical - ensure this edge is defined PROPERLY
+    graph.add_conditional_edges(
+        "conversation_memory",
+        should_end,
+        {END: END, "query_analyzer": "query_analyzer"}
+    )
 
-    # Compile the graph - no recursion_limit parameter in this version
+    # Compile the graph
     return graph.compile()
 
 def create_research_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:

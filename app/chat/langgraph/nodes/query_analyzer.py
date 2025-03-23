@@ -14,7 +14,7 @@ from app.chat.utils.extraction import extract_technical_terms
 
 logger = logging.getLogger(__name__)
 
-def analyze_query(state: GraphState) -> GraphState:
+def analyze_query(state: GraphState) -> dict:
     """
     Analyze a user query to determine optimal retrieval strategy.
     Enhanced with chunk level and embedding type selection.
@@ -23,13 +23,13 @@ def analyze_query(state: GraphState) -> GraphState:
         state: Current graph state
 
     Returns:
-        Updated graph state with query analysis
+        Dictionary with updated query_state
     """
     try:
         # Validate state
         if not state.query_state:
             logger.error("Query state is required for analysis")
-            return state
+            return {"query_state": state.query_state}
 
         # Get query from state
         query = state.query_state.query.lower() if state.query_state.query else ""
@@ -187,7 +187,7 @@ def analyze_query(state: GraphState) -> GraphState:
                    f"research_mode={is_research_mode}, "
                    f"concepts={technical_concepts[:5] if technical_concepts else []}")
 
-        return state
+        return {"query_state": state.query_state}
 
     except Exception as e:
         logger.error(f"Query analysis error: {str(e)}", exc_info=True)
@@ -199,7 +199,7 @@ def analyze_query(state: GraphState) -> GraphState:
             state.query_state.preferred_chunk_level = ChunkLevel.SECTION
             state.query_state.preferred_embedding_type = EmbeddingType.GENERAL
 
-        return state
+        return {"query_state": state.query_state}
 
 def contains_pattern(text: str, patterns: List[str]) -> bool:
     """

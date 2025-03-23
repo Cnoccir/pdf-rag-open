@@ -15,7 +15,7 @@ from app.chat.vector_stores import get_vector_store
 
 logger = logging.getLogger(__name__)
 
-def retrieve_content(state: GraphState) -> GraphState:
+def retrieve_content(state: GraphState) -> dict:
     """
     Retrieve content based on query analysis.
     Enhanced to handle errors and empty results gracefully.
@@ -24,7 +24,7 @@ def retrieve_content(state: GraphState) -> GraphState:
         state: Current graph state
 
     Returns:
-        Updated graph state with retrieved content
+        Dictionary with updated retrieval_state
     """
     # Validate state
     if not state.query_state:
@@ -37,7 +37,7 @@ def retrieve_content(state: GraphState) -> GraphState:
             chunk_levels_used=[],
             embedding_types_used=[]
         )
-        return state
+        return {"retrieval_state": state.retrieval_state}
 
     # Extract query parameters
     query = state.query_state.query
@@ -74,7 +74,7 @@ def retrieve_content(state: GraphState) -> GraphState:
                     chunk_levels_used=[],
                     embedding_types_used=[]
                 )
-                return state
+                return {"retrieval_state": state.retrieval_state}
 
         # Get content filter types if specified
         content_types = None
@@ -107,7 +107,7 @@ def retrieve_content(state: GraphState) -> GraphState:
                         chunk_levels_used=[],
                         embedding_types_used=[]
                     )
-                    return state
+                    return {"retrieval_state": state.retrieval_state}
 
             # CRITICAL FIX: Check which stores are actually available
             mongo_available = (hasattr(vector_store, "mongo_store") and
@@ -138,7 +138,7 @@ def retrieve_content(state: GraphState) -> GraphState:
                     chunk_levels_used=[],
                     embedding_types_used=[]
                 )
-                return state
+                return {"retrieval_state": state.retrieval_state}
 
         except Exception as vs_error:
             logger.error(f"Vector store error: {str(vs_error)}")
@@ -150,7 +150,7 @@ def retrieve_content(state: GraphState) -> GraphState:
                 chunk_levels_used=[],
                 embedding_types_used=[]
             )
-            return state
+            return {"retrieval_state": state.retrieval_state}
 
         # Execute retrieval based on strategy with retry mechanism
         all_results = []
@@ -330,7 +330,7 @@ def retrieve_content(state: GraphState) -> GraphState:
                 procedures_retrieved=procedures_retrieved,
                 parameters_retrieved=parameters_retrieved
             )
-            return state
+            return {"retrieval_state": state.retrieval_state}
 
         # If in research mode, sort results by score
         if is_research_mode and len(all_results) > 0:
@@ -416,6 +416,8 @@ def retrieve_content(state: GraphState) -> GraphState:
                     f"{len(procedures_retrieved)} procedures, {len(parameters_retrieved)} parameters "
                     f"with chunk levels {chunk_levels_used} and embedding types {embedding_types_used}")
 
+        return {"retrieval_state": state.retrieval_state}
+
     except Exception as e:
         logger.error(f"Error in retrieval: {str(e)}", exc_info=True)
         state.retrieval_state = RetrievalState(
@@ -429,4 +431,4 @@ def retrieve_content(state: GraphState) -> GraphState:
             parameters_retrieved=[]
         )
 
-    return state
+        return {"retrieval_state": state.retrieval_state}
