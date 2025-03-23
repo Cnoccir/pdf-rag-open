@@ -64,8 +64,19 @@ def process_query(
         else:
             pdf_ids_to_use = [pdf_id] if pdf_id else None
 
-        # Process query
-        result = chat_manager.query(query, pdf_ids_to_use)
+        # Add timeout protection for the query
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(chat_manager.query, query, pdf_ids_to_use)
+            try:
+                # 45-second timeout for processing
+                result = future.result(timeout=45)
+            except concurrent.futures.TimeoutError:
+                logger.error(f"Query processing timed out after 45 seconds: {query[:50]}...")
+                return {
+                    "error": "Processing timed out. Your query might be too complex.",
+                    "conversation_id": conversation_id
+                }
 
         # Ensure conversation_id is included
         if not result.get("conversation_id") and chat_manager.conversation_id:

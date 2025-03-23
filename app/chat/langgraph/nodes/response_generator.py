@@ -219,7 +219,6 @@ def generate_response(state: GraphState) -> GraphState:
 
         # Extract citations from the response
         citations = extract_citations(response_text, citation_map)
-
         # Create generation state
         state.generation_state = GenerationState(
             response=response_text,
@@ -235,7 +234,9 @@ def generate_response(state: GraphState) -> GraphState:
                 "research_mode": is_research_mode,
                 "document_count": len(state.query_state.pdf_ids) if state.query_state.pdf_ids else 1,
                 "chunk_levels_used": state.retrieval_state.chunk_levels_used if hasattr(state.retrieval_state, 'chunk_levels_used') else [],
-                "embedding_types_used": state.retrieval_state.embedding_types_used if hasattr(state.retrieval_state, 'embedding_types_used') else []
+                "embedding_types_used": state.retrieval_state.embedding_types_used if hasattr(state.retrieval_state, 'embedding_types_used') else [],
+                # ADDED: Track cycle metadata for debugging
+                "processing_cycles": state.conversation_state.metadata.get("cycle_count", 0) if state.conversation_state and state.conversation_state.metadata else 0
             },
             token_usage={
                 "prompt_tokens": response.usage.prompt_tokens,
@@ -243,6 +244,11 @@ def generate_response(state: GraphState) -> GraphState:
                 "total_tokens": response.usage.total_tokens
             }
         )
+
+        # CRITICAL FIX: Mark response as processed to signal completion
+        if state.conversation_state and state.conversation_state.metadata:
+            state.conversation_state.metadata["processed_response"] = True
+            state.conversation_state.metadata["completed_at"] = datetime.now().isoformat()
 
         logger.info(
             f"Response generation complete with {len(citations)} citations, "
@@ -263,6 +269,31 @@ def generate_response(state: GraphState) -> GraphState:
             citations=[],
             metadata={"error": str(e)}
         )
+
+        # IMPORTANT: Mark as processed even for errors to avoid infinite loops
+        if state.conversation_state and state.conversation_state.metadata:
+            state.conversation_state.metadata["processed_response"] = True
+            state.conversation_state.metadata["error"] = str(e)
+
+        return state
+
+    except Exception as e:
+        logger.error(f"Response generation failed: {str(e)}", exc_info=True)
+
+        # Generate error response
+        error_response = "I'm sorry, but I encountered an error while generating a response. Please try again or rephrase your query."
+
+        # Create error state
+        state.generation_state = GenerationState(
+            response=error_response,
+            citations=[],
+            metadata={"error": str(e)}
+        )
+
+        # IMPORTANT: Mark as processed even for errors to avoid infinite loops
+        if state.conversation_state and state.conversation_state.metadata:
+            state.conversation_state.metadata["processed_response"] = True
+            state.conversation_state.metadata["error"] = str(e)
 
         return state
 

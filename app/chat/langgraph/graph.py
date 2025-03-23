@@ -65,7 +65,8 @@ def create_query_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:
         # Safety check - if we've gone through too many cycles
         if state.conversation_state and state.conversation_state.metadata:
             cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
-            if cycle_count > 3:
+            # Increase the safety limit from 3 to 10 for more headroom
+            if cycle_count > 10:
                 logger.warning(f"Ending graph after {cycle_count} cycles (safety limit)")
                 # Force processed flag before ending
                 state.conversation_state.metadata["processed_response"] = True
@@ -76,7 +77,7 @@ def create_query_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:
 
     graph.add_conditional_edges("conversation_memory", should_end)
 
-    # Compile the graph WITHOUT recursion_limit (which was causing the error)
+    # Compile the graph - no recursion_limit parameter in this version
     return graph.compile()
 
 def create_research_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:
@@ -136,7 +137,8 @@ def create_research_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph
         # Safety check - if we've gone through too many cycles
         if state.conversation_state and state.conversation_state.metadata:
             cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
-            if cycle_count > 3:
+            # Increase the safety limit from 3 to 10 for more headroom
+            if cycle_count > 10:
                 logger.warning(f"Ending research graph after {cycle_count} cycles (safety limit)")
                 # Force processed flag before ending
                 state.conversation_state.metadata["processed_response"] = True
@@ -147,7 +149,7 @@ def create_research_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph
 
     graph.add_conditional_edges("conversation_memory", should_end)
 
-    # Compile the graph WITHOUT recursion_limit
+    # Compile the graph - no recursion_limit parameter in this version
     return graph.compile()
 
 def create_document_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:
@@ -172,7 +174,7 @@ def create_document_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph
     graph.set_entry_point("document_processor")
     graph.add_edge("document_processor", END)
 
-    # Compile the graph
+    # Compile the graph - no recursion_limit parameter in this version
     return graph.compile()
 
 # Expose graph creation functions for LangGraph Studio

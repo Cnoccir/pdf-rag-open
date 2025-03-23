@@ -7,12 +7,12 @@ import traceback
 from datetime import datetime
 import concurrent.futures
 from typing import Dict, Any, List, Optional
+import sys
 
 from app.web.hooks import login_required
 from app.web.db.models import Pdf, User, Conversation
 from app.web.db import db
 from app.chat.vector_stores import get_vector_store, get_mongo_store, get_qdrant_store
-from app.web.async_wrapper import async_handler
 from app.chat.memories.memory_manager import MemoryManager
 from qdrant_client.http import models
 
@@ -23,12 +23,10 @@ bp = Blueprint("health", __name__, url_prefix="/api/health")
 def get_database_status():
     """Get database connections and status data."""
     try:
-        # Get current database status
         mongo_store = get_mongo_store()
         qdrant_store = get_qdrant_store()
         vector_store = get_vector_store()
 
-        # Check initialization status
         db_status = {
             "mongo": {
                 "initialized": mongo_store._initialized,
@@ -45,10 +43,7 @@ def get_database_status():
             "timestamp": datetime.utcnow().isoformat()
         }
 
-        # Check if we should attempt initialization
-        force_init = False  # Default value when not in request context
-
-        # If in request context, get from request args
+        force_init = False
         if request:
             force_init = request.args.get("force_init", "").lower() == "true"
 
@@ -58,8 +53,6 @@ def get_database_status():
             vector_store._initialized
         ]):
             logger.info("Attempting database initialization")
-
-            # Try initializing MongoDB
             if not mongo_store._initialized:
                 mongo_init_success = mongo_store.initialize()
                 db_status["mongo"]["initialization_attempted"] = True
@@ -67,8 +60,6 @@ def get_database_status():
                 if mongo_init_success:
                     db_status["mongo"]["status"] = "ok"
                     db_status["mongo"]["initialized"] = True
-
-            # Try initializing Qdrant
             if not qdrant_store._initialized:
                 qdrant_init_success = qdrant_store.initialize()
                 db_status["qdrant"]["initialization_attempted"] = True
@@ -76,8 +67,6 @@ def get_database_status():
                 if qdrant_init_success:
                     db_status["qdrant"]["status"] = "ok"
                     db_status["qdrant"]["initialized"] = True
-
-            # Try initializing Vector Store
             if not vector_store._initialized:
                 vector_init_success = vector_store.initialize()
                 db_status["vector_store"]["initialization_attempted"] = True
@@ -86,7 +75,6 @@ def get_database_status():
                     db_status["vector_store"]["status"] = "ok"
                     db_status["vector_store"]["initialized"] = True
 
-        # Get MongoDB stats if initialized
         if mongo_store._initialized:
             try:
                 mongo_stats = mongo_store.get_stats()
@@ -95,7 +83,6 @@ def get_database_status():
                 logger.error(f"Error getting MongoDB stats: {str(mongo_error)}")
                 db_status["mongo"]["stats_error"] = str(mongo_error)
 
-        # Get vector counts from Qdrant if initialized
         if qdrant_store._initialized and qdrant_store.client:
             try:
                 collection_count = qdrant_store.client.count(
@@ -103,8 +90,6 @@ def get_database_status():
                     count_filter=None
                 )
                 db_status["qdrant"]["vector_count"] = collection_count.count
-
-                # Get collection info
                 collection_info = qdrant_store.client.get_collection(qdrant_store.collection_name)
                 db_status["qdrant"]["collection_info"] = {
                     "name": qdrant_store.collection_name,
@@ -115,14 +100,12 @@ def get_database_status():
                 logger.error(f"Error getting Qdrant stats: {str(qdrant_error)}")
                 db_status["qdrant"]["stats_error"] = str(qdrant_error)
 
-        # Check overall database status
         all_initialized = all([
             db_status["mongo"]["initialized"],
             db_status["qdrant"]["initialized"],
             db_status["vector_store"]["initialized"]
         ])
 
-        # Return the raw dictionary (not a Flask response)
         return {
             "status": "ok" if all_initialized else "degraded",
             "databases": db_status,
@@ -140,19 +123,14 @@ def get_database_status():
 
 @bp.route("/", methods=["GET"])
 def check_health():
-    """Basic health check for system status."""
     try:
-        # Simple status check
         status = {
             "status": "ok",
             "time": datetime.utcnow().isoformat(),
             "message": "PDF RAG system is running"
         }
-
-        # Add app version if available
         if hasattr(current_app, 'version'):
             status["version"] = current_app.version
-
         return jsonify(status)
     except Exception as e:
         logger.error(f"Health check error: {str(e)}")
@@ -165,19 +143,14 @@ def check_health():
 @bp.route("/system", methods=["GET"])
 @login_required
 def check_system():
-    """Comprehensive system health check."""
     try:
         health_data = {
             "status": "checking",
             "timestamp": datetime.utcnow().isoformat(),
             "components": {}
         }
-
-        # Update this line to use the helper function
         db_status = get_database_status()
         health_data["components"]["databases"] = db_status
-
-        # Check memory manager
         try:
             memory_manager = MemoryManager()
             memory_stats = memory_manager.get_stats()
@@ -192,8 +165,6 @@ def check_system():
                 "status": "error",
                 "error": str(memory_error)
             }
-
-        # Check RAG Monitor if available
         try:
             if hasattr(current_app, 'config') and 'RAG_MONITOR' in current_app.config:
                 monitor = current_app.config['RAG_MONITOR']
@@ -212,13 +183,10 @@ def check_system():
                 "status": "error",
                 "error": str(monitor_error)
             }
-
-        # Check user stats from database
         try:
             user_count = db.session.query(User).count()
             pdf_count = db.session.query(Pdf).filter_by(is_deleted=False).count()
             conversation_count = db.session.query(Conversation).filter_by(is_deleted=False).count()
-
             health_data["components"]["database_stats"] = {
                 "status": "ok",
                 "user_count": user_count,
@@ -231,8 +199,6 @@ def check_system():
                 "status": "error",
                 "error": str(db_stats_error)
             }
-
-        # Check file storage
         try:
             from app.web.files import get_s3_client
             s3_client = get_s3_client()
@@ -253,21 +219,14 @@ def check_system():
                 "status": "error",
                 "error": str(storage_error)
             }
-
-        # Determine overall status
-        component_statuses = [
-            comp.get("status") for comp in health_data["components"].values()
-        ]
-
+        component_statuses = [comp.get("status") for comp in health_data["components"].values()]
         if all(status == "ok" for status in component_statuses):
             health_data["status"] = "ok"
         elif "error" in component_statuses:
             health_data["status"] = "error"
         else:
             health_data["status"] = "degraded"
-
         return jsonify(health_data)
-
     except Exception as e:
         logger.error(f"System health check failed: {str(e)}", exc_info=True)
         return jsonify({
@@ -279,17 +238,12 @@ def check_system():
 @bp.route("/databases", methods=["GET"])
 @login_required
 def check_databases():
-    """Database health check endpoint."""
-    # Get database status
     status_data = get_database_status()
-    # Return as JSON response
     return jsonify(status_data)
 
 @bp.route("/pdf/<string:pdf_id>", methods=["GET"])
 @login_required
-@async_handler
-async def check_pdf(pdf_id):
-    """Check PDF existence and health in the system."""
+def check_pdf(pdf_id):
     try:
         result = {
             "pdf_id": pdf_id,
@@ -303,8 +257,6 @@ async def check_pdf(pdf_id):
             "metadata": {},
             "vector_info": {}
         }
-
-        # Check in SQL database
         pdf_record = db.session.query(Pdf).filter_by(id=pdf_id).first()
         if pdf_record:
             result["exists"]["database"] = True
@@ -317,16 +269,12 @@ async def check_pdf(pdf_id):
                 "created_at": pdf_record.created_at.isoformat() if hasattr(pdf_record.created_at, "isoformat") else str(pdf_record.created_at),
                 "updated_at": pdf_record.updated_at.isoformat() if hasattr(pdf_record.updated_at, "isoformat") else str(pdf_record.updated_at)
             }
-
-            # Get additional metadata if available
             try:
                 meta = pdf_record.get_metadata()
                 if meta:
                     result["metadata"]["document_meta"] = meta
-            except:
+            except Exception:
                 pass
-
-        # Check in MongoDB
         mongo_store = get_mongo_store()
         if mongo_store._initialized:
             doc = mongo_store.get_document(pdf_id)
@@ -337,27 +285,19 @@ async def check_pdf(pdf_id):
                     "created_at": str(doc.get("created_at", "")),
                     "updated_at": str(doc.get("updated_at", ""))
                 }
-
-                # Count elements
                 try:
                     elements = mongo_store.get_elements_by_pdf_id(pdf_id, limit=5000)
                     result["mongodb_info"]["element_count"] = len(elements)
-
-                    # Get content type breakdown
                     content_types = {}
                     for elem in elements:
                         ct = elem.get("content_type", "unknown")
                         content_types[ct] = content_types.get(ct, 0) + 1
                     result["mongodb_info"]["content_types"] = content_types
-
-                    # Get concept count
                     concepts = mongo_store.get_concepts_by_pdf_id(pdf_id, limit=5000)
                     result["mongodb_info"]["concept_count"] = len(concepts)
                 except Exception as count_error:
                     logger.error(f"Error counting elements: {str(count_error)}")
                     result["mongodb_info"]["error"] = str(count_error)
-
-        # Check in Qdrant
         qdrant_store = get_qdrant_store()
         if qdrant_store._initialized and qdrant_store.client:
             try:
@@ -372,12 +312,9 @@ async def check_pdf(pdf_id):
                         ]
                     )
                 )
-
                 result["exists"]["qdrant"] = count_result.count > 0
                 result["vector_info"]["embedding_count"] = count_result.count
-
                 if count_result.count > 0:
-                    # Get a sample of vectors
                     sample_result = qdrant_store.client.scroll(
                         collection_name=qdrant_store.collection_name,
                         scroll_filter=models.Filter(
@@ -392,8 +329,6 @@ async def check_pdf(pdf_id):
                         with_payload=True,
                         with_vectors=False
                     )
-
-                    # Extract metadata from samples
                     samples = []
                     for point in sample_result[0]:
                         if point.payload:
@@ -402,13 +337,10 @@ async def check_pdf(pdf_id):
                                 "content_type": point.payload.get("content_type", ""),
                                 "page_number": point.payload.get("page_number", 0),
                             })
-
                     result["vector_info"]["samples"] = samples
             except Exception as qdrant_error:
                 logger.error(f"Error checking Qdrant for PDF {pdf_id}: {str(qdrant_error)}")
                 result["vector_info"]["error"] = str(qdrant_error)
-
-        # Check in S3
         try:
             from app.web.files import get_s3_client, get_s3_key
             s3_client = get_s3_client()
@@ -422,28 +354,24 @@ async def check_pdf(pdf_id):
                     result["exists"]["s3"] = True
                     result["s3_info"] = {
                         "bucket": current_app.config['AWS_BUCKET_NAME'],
-                        "key": s3_key
+                        "key": s3_key,
+                        "message": "File found in S3"
                     }
                 except Exception as s3_head_error:
-                    # Object doesn't exist or other error
                     logger.info(f"S3 head check failed for {pdf_id}: {str(s3_head_error)}")
-                    result["s3_info"] = {"error": str(s3_head_error)}
+                    result["s3_info"] = {"error": str(s3_head_error), "key": s3_key}
         except Exception as s3_error:
             logger.error(f"Error checking S3 for PDF {pdf_id}: {str(s3_error)}")
             result["s3_info"] = {"error": str(s3_error)}
-
-        # Test a simple query if document exists in both MongoDB and Qdrant
         if result["exists"]["mongodb"] and result["exists"]["qdrant"]:
             try:
                 vector_store = get_vector_store()
                 if vector_store._initialized:
-                    # Simple test query
                     test_results = vector_store.semantic_search(
                         query="what is this document about",
                         k=3,
                         pdf_id=pdf_id
                     )
-
                     result["query_test"] = {
                         "status": "ok",
                         "result_count": len(test_results),
@@ -455,8 +383,6 @@ async def check_pdf(pdf_id):
                     "status": "error",
                     "error": str(query_error)
                 }
-
-        # Overall status
         any_exists = any(result["exists"].values())
         all_exists = all([
             result["exists"]["database"],
@@ -464,13 +390,10 @@ async def check_pdf(pdf_id):
             result["exists"]["qdrant"],
             result["exists"]["s3"]
         ])
-
         if all_exists:
             result["status"] = "ok"
         elif any_exists:
             result["status"] = "partial"
-
-            # Identify specific misalignment
             if result["exists"]["database"] and not result["exists"]["mongodb"]:
                 result["issue"] = "PDF exists in database but not in MongoDB"
             elif result["exists"]["database"] and not result["exists"]["qdrant"]:
@@ -479,9 +402,7 @@ async def check_pdf(pdf_id):
                 result["issue"] = "PDF exists in database but not in S3"
         else:
             result["status"] = "not_found"
-
         return jsonify(result)
-
     except Exception as e:
         logger.error(f"PDF check failed for {pdf_id}: {str(e)}", exc_info=True)
         return jsonify({
@@ -495,7 +416,6 @@ async def check_pdf(pdf_id):
 @bp.route("/query_test", methods=["POST"])
 @login_required
 def test_query():
-    """Test a query against the vector store without going through the full workflow."""
     try:
         data = request.json
         if not data or "query" not in data:
@@ -505,13 +425,11 @@ def test_query():
         pdf_id = data.get("pdf_id")
         k = int(data.get("k", 5))
 
-        # Get vector store
         vector_store = get_vector_store()
         if not vector_store._initialized:
             if not vector_store.initialize():
                 return jsonify({"error": "Vector store not initialized"}), 500
 
-        # Execute semantic search
         start_time = time.time()
         results = vector_store.semantic_search(
             query=query,
@@ -520,14 +438,11 @@ def test_query():
         )
         query_time = time.time() - start_time
 
-        # Format results
         formatted_results = []
         for i, doc in enumerate(results):
-            # Truncate long content for the response
             content = doc.page_content
             if len(content) > 300:
                 content = content[:300] + "..."
-
             formatted_results.append({
                 "index": i,
                 "content": content,
@@ -538,7 +453,6 @@ def test_query():
                 "element_id": doc.metadata.get("element_id", ""),
             })
 
-        # Create response
         response = {
             "query": query,
             "pdf_id": pdf_id,
@@ -547,7 +461,6 @@ def test_query():
             "results": formatted_results
         }
 
-        # Also perform a keyword search for comparison
         try:
             mongo_store = get_mongo_store()
             if mongo_store._initialized:
@@ -558,24 +471,20 @@ def test_query():
                     limit=k
                 )
                 keyword_time = time.time() - keyword_start_time
-
-                # Format keyword results
                 formatted_keyword_results = []
-                for i, result in enumerate(keyword_results):
-                    content = result.get("content", "")
+                for i, res in enumerate(keyword_results):
+                    content = res.get("content", "")
                     if len(content) > 300:
                         content = content[:300] + "..."
-
                     formatted_keyword_results.append({
                         "index": i,
                         "content": content,
-                        "score": result.get("score", 0),
-                        "pdf_id": result.get("pdf_id", ""),
-                        "content_type": result.get("content_type", ""),
-                        "page": result.get("page_number", 0) or result.get("page", 0),
-                        "element_id": result.get("element_id", ""),
+                        "score": res.get("score", 0),
+                        "pdf_id": res.get("pdf_id", ""),
+                        "content_type": res.get("content_type", ""),
+                        "page": res.get("page_number", 0) or res.get("page", 0),
+                        "element_id": res.get("element_id", ""),
                     })
-
                 response["keyword_search"] = {
                     "results_count": len(keyword_results),
                     "time_taken": keyword_time,
@@ -586,7 +495,6 @@ def test_query():
             response["keyword_search_error"] = str(keyword_error)
 
         return jsonify(response)
-
     except Exception as e:
         logger.error(f"Query test failed: {str(e)}", exc_info=True)
         return jsonify({
@@ -598,7 +506,6 @@ def test_query():
 @bp.route("/metrics", methods=["GET"])
 @login_required
 def get_system_metrics():
-    """Get system-wide metrics and stats."""
     try:
         metrics = {
             "timestamp": datetime.utcnow().isoformat(),
@@ -608,15 +515,11 @@ def get_system_metrics():
             "conversations": {},
             "users": {}
         }
-
-        # Get SQL database stats
         try:
-            # PDF stats
             pdf_count = db.session.query(Pdf).count()
             active_pdf_count = db.session.query(Pdf).filter_by(is_deleted=False).count()
             processed_pdf_count = db.session.query(Pdf).filter_by(processed=True).count()
             error_pdf_count = db.session.query(Pdf).filter(Pdf.error.isnot(None)).count()
-
             metrics["pdfs"] = {
                 "total": pdf_count,
                 "active": active_pdf_count,
@@ -624,12 +527,8 @@ def get_system_metrics():
                 "with_errors": error_pdf_count,
                 "percent_processed": round((processed_pdf_count / max(1, active_pdf_count)) * 100, 2)
             }
-
-            # Conversation stats
             conversation_count = db.session.query(Conversation).count()
             active_conversation_count = db.session.query(Conversation).filter_by(is_deleted=False).count()
-
-            # Try to get average messages per conversation
             try:
                 from app.web.db.models.message import Message
                 message_count = db.session.query(Message).count()
@@ -637,15 +536,12 @@ def get_system_metrics():
             except:
                 message_count = 0
                 avg_messages = 0
-
             metrics["conversations"] = {
                 "total": conversation_count,
                 "active": active_conversation_count,
                 "messages": message_count,
                 "avg_messages_per_conversation": round(avg_messages, 2)
             }
-
-            # User stats
             user_count = db.session.query(User).count()
             metrics["users"] = {
                 "total": user_count,
@@ -655,8 +551,6 @@ def get_system_metrics():
         except Exception as db_error:
             logger.error(f"Error getting database metrics: {str(db_error)}")
             metrics["database"]["error"] = str(db_error)
-
-        # MongoDB stats
         mongo_store = get_mongo_store()
         if mongo_store._initialized:
             try:
@@ -665,34 +559,23 @@ def get_system_metrics():
             except Exception as mongo_error:
                 logger.error(f"Error getting MongoDB metrics: {str(mongo_error)}")
                 metrics["mongodb"] = {"error": str(mongo_error)}
-
-        # Qdrant stats
         qdrant_store = get_qdrant_store()
         if qdrant_store._initialized and qdrant_store.client:
             try:
-                # Get collection count
                 collection_count = qdrant_store.client.count(
                     collection_name=qdrant_store.collection_name,
                     count_filter=None
                 )
-
-                # Get collection info
                 collection_info = qdrant_store.client.get_collection(qdrant_store.collection_name)
-
                 metrics["qdrant"] = {
                     "vector_count": collection_count.count,
                     "collection": qdrant_store.collection_name,
                     "dimension": collection_info.config.params.vectors.size
                 }
-
-                # Get metrics for operations
                 metrics["qdrant"]["metrics"] = qdrant_store.metrics
-
             except Exception as qdrant_error:
                 logger.error(f"Error getting Qdrant metrics: {str(qdrant_error)}")
                 metrics["qdrant"] = {"error": str(qdrant_error)}
-
-        # Memory manager stats
         try:
             memory_manager = MemoryManager()
             memory_stats = memory_manager.get_stats()
@@ -700,19 +583,14 @@ def get_system_metrics():
         except Exception as memory_error:
             logger.error(f"Error getting memory manager metrics: {str(memory_error)}")
             metrics["memory_manager"] = {"error": str(memory_error)}
-
-        # RAG Monitor stats if available
         try:
             if hasattr(current_app, 'config') and 'RAG_MONITOR' in current_app.config:
                 monitor = current_app.config['RAG_MONITOR']
                 recent_ops = monitor.get_recent_operations(20)
-
-                # Aggregate operations by type
                 op_types = {}
                 for op in recent_ops:
                     op_type = op.get("operation", "unknown")
                     op_types[op_type] = op_types.get(op_type, 0) + 1
-
                 metrics["rag_monitor"] = {
                     "recent_operations": len(recent_ops),
                     "operation_types": op_types
@@ -720,9 +598,7 @@ def get_system_metrics():
         except Exception as monitor_error:
             logger.error(f"Error getting RAG monitor metrics: {str(monitor_error)}")
             metrics["rag_monitor"] = {"error": str(monitor_error)}
-
         return jsonify(metrics)
-
     except Exception as e:
         logger.error(f"Error getting system metrics: {str(e)}", exc_info=True)
         return jsonify({
@@ -733,16 +609,12 @@ def get_system_metrics():
 
 @bp.route("/vector_stores", methods=["GET"])
 @login_required
-@async_handler
-async def check_vector_stores():
-    """Detailed health check for vector stores."""
+def check_vector_stores():
     try:
-        # Get vector stores
         mongo_store = get_mongo_store()
         qdrant_store = get_qdrant_store()
         vector_store = get_vector_store()
 
-        # Initialize health info structure
         health_info = {
             "timestamp": datetime.utcnow().isoformat(),
             "mongo": {"status": "checking"},
@@ -750,36 +622,31 @@ async def check_vector_stores():
             "unified": {"status": "checking"}
         }
 
-        # Call the health check functions with correct async handling
-        if inspect.iscoroutinefunction(mongo_store.check_health):
-            health_info["mongo"] = await mongo_store.check_health()
-        else:
+        if hasattr(mongo_store, "check_health") and callable(mongo_store.check_health):
             health_info["mongo"] = mongo_store.check_health()
-
-        if inspect.iscoroutinefunction(qdrant_store.check_health):
-            health_info["qdrant"] = await qdrant_store.check_health()
         else:
+            health_info["mongo"] = {"status": "ok" if mongo_store._initialized else "error"}
+
+        if hasattr(qdrant_store, "check_health") and callable(qdrant_store.check_health):
             health_info["qdrant"] = qdrant_store.check_health()
-
-        if inspect.iscoroutinefunction(vector_store.check_health):
-            health_info["unified"] = await vector_store.check_health()
         else:
-            health_info["unified"] = vector_store.check_health()
+            health_info["qdrant"] = {"status": "ok" if qdrant_store._initialized else "error"}
 
-        # Determine overall status using .get() for safe access
+        if hasattr(vector_store, "check_health") and callable(vector_store.check_health):
+            health_info["unified"] = vector_store.check_health()
+        else:
+            health_info["unified"] = {"status": "ok" if vector_store._initialized else "error"}
+
         if (health_info["mongo"].get("status") == "ok" and
             health_info["qdrant"].get("status") == "ok" and
             health_info["unified"].get("status") == "ok"):
             health_info["status"] = "ok"
-        elif (health_info["mongo"].get("status") == "error" or
-              health_info["qdrant"].get("status") == "error" or
-              health_info["unified"].get("status") == "error"):
+        elif ("error" in [health_info["mongo"].get("status"), health_info["qdrant"].get("status"), health_info["unified"].get("status")]):
             health_info["status"] = "error"
         else:
             health_info["status"] = "degraded"
 
         return jsonify(health_info)
-
     except Exception as e:
         logger.error(f"Vector store health check failed: {str(e)}", exc_info=True)
         return jsonify({
@@ -788,306 +655,20 @@ async def check_vector_stores():
             "timestamp": datetime.utcnow().isoformat()
         }), 500
 
-async def async_check_mongo_health(mongo_store):
-    """Check MongoDB health asynchronously with improved error handling."""
-    try:
-        # Initialize health info
-        health_info = {
-            "status": "checking",
-            "initialized": False,
-            "connection": "unknown",
-            "database_ready": False,
-            "collections": {},
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        # First check if store is initialized
-        health_info["initialized"] = mongo_store._initialized if hasattr(mongo_store, "_initialized") else False
-
-        if not health_info["initialized"]:
-            health_info["status"] = "error"
-            health_info["error"] = "MongoDB store not initialized"
-            return health_info
-
-        # Check if client exists
-        if not hasattr(mongo_store, "client") or mongo_store.client is None:
-            health_info["status"] = "error"
-            health_info["error"] = "MongoDB client not available"
-            health_info["connection"] = "failed"
-            return health_info
-
-        # Use a try block for all MongoDB operations
-        try:
-            # Test connection by ping
-            mongo_store.client.admin.command('ping')
-            health_info["connection"] = "connected"
-
-            # Check db object
-            if not hasattr(mongo_store, "db") or mongo_store.db is None:
-                health_info["status"] = "error"
-                health_info["error"] = "MongoDB database object not available"
-                return health_info
-
-            # Check collections by trying to list collection names
-            try:
-                collection_names = list(mongo_store.db.list_collection_names())
-                health_info["database_ready"] = True
-                health_info["collection_names"] = collection_names
-            except Exception as coll_err:
-                health_info["status"] = "error"
-                health_info["error"] = f"Failed to list collections: {str(coll_err)}"
-                return health_info
-
-            # Try to get basic stats for each collection
-            for collection_name in ["documents", "content_elements", "concepts", "relationships"]:
-                try:
-                    if collection_name in collection_names:
-                        # Use a more reliable approach to get count that avoids boolean tests
-                        collection = getattr(mongo_store.db, collection_name)
-                        if collection is not None:
-                            count = 0
-                            # Use a try block specifically for count operation
-                            try:
-                                count = collection.count_documents({})
-                            except Exception as count_err:
-                                health_info["collections"][collection_name] = {"error": f"Count error: {str(count_err)}"}
-                                continue
-
-                            health_info["collections"][collection_name] = {"count": count}
-                    else:
-                        health_info["collections"][collection_name] = {"exists": False}
-                except Exception as coll_access_err:
-                    health_info["collections"][collection_name] = {"error": str(coll_access_err)}
-
-            # All checks passed
-            health_info["status"] = "ok"
-
-        except Exception as db_err:
-            health_info["status"] = "error"
-            health_info["error"] = f"MongoDB operation failed: {str(db_err)}"
-            health_info["connection"] = "failed"
-
-        return health_info
-
-    except Exception as e:
-        # Handle any other exceptions
-        return {
-            "status": "error",
-            "error": f"Health check failed: {str(e)}",
-            "initialized": getattr(mongo_store, "_initialized", False),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-async def async_check_qdrant_health(qdrant_store):
-    """Check Qdrant health asynchronously with improved error handling."""
-    try:
-        # Initialize health info
-        health_info = {
-            "status": "checking",
-            "initialized": False,
-            "connection": "unknown",
-            "database_ready": False,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        # Check if store is initialized
-        health_info["initialized"] = qdrant_store._initialized if hasattr(qdrant_store, "_initialized") else False
-
-        if not health_info["initialized"]:
-            health_info["status"] = "error"
-            health_info["error"] = "Qdrant store not initialized"
-            return health_info
-
-        # Check if client exists
-        if not hasattr(qdrant_store, "client") or qdrant_store.client is None:
-            health_info["status"] = "error"
-            health_info["error"] = "Qdrant client not available"
-            health_info["connection"] = "failed"
-            return health_info
-
-        # Use a try block for all Qdrant operations
-        try:
-            # Check collection info
-            try:
-                collection_info = qdrant_store.client.get_collection(
-                    collection_name=qdrant_store.collection_name
-                )
-                health_info["collection"] = qdrant_store.collection_name
-                health_info["connection"] = "connected"
-
-                # Add dimensions from collection config
-                if hasattr(collection_info, "config") and hasattr(collection_info.config, "params"):
-                    if hasattr(collection_info.config.params, "vectors"):
-                        vectors_config = collection_info.config.params.vectors
-                        if hasattr(vectors_config, "size"):
-                            health_info["dimension"] = vectors_config.size
-                        if hasattr(vectors_config, "distance"):
-                            health_info["distance"] = str(vectors_config.distance)
-
-            except Exception as coll_error:
-                health_info["status"] = "error"
-                health_info["error"] = f"Failed to get collection info: {str(coll_error)}"
-                return health_info
-
-            # Count vectors
-            try:
-                count_result = qdrant_store.client.count(
-                    collection_name=qdrant_store.collection_name,
-                    count_filter=None
-                )
-
-                # Safely extract count
-                if hasattr(count_result, "count"):
-                    health_info["vector_count"] = count_result.count
-
-                health_info["database_ready"] = True
-
-            except Exception as count_error:
-                health_info["status"] = "error"
-                health_info["error"] = f"Failed to count vectors: {str(count_error)}"
-                return health_info
-
-            # All checks passed
-            health_info["status"] = "ok"
-
-        except Exception as qdrant_err:
-            health_info["status"] = "error"
-            health_info["error"] = f"Qdrant operation failed: {str(qdrant_err)}"
-            health_info["connection"] = "failed"
-
-        return health_info
-
-    except Exception as e:
-        # Handle any other exceptions
-        return {
-            "status": "error",
-            "error": f"Health check failed: {str(e)}",
-            "initialized": getattr(qdrant_store, "_initialized", False),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-async def async_check_unified_health(vector_store):
-    """Check unified vector store health asynchronously with improved error handling."""
-    try:
-        # Initialize health info
-        health_info = {
-            "status": "checking",
-            "initialized": False,
-            "components": {
-                "mongo_ready": False,
-                "qdrant_ready": False
-            },
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        # Check if store is initialized
-        health_info["initialized"] = vector_store._initialized if hasattr(vector_store, "_initialized") else False
-
-        if not health_info["initialized"]:
-            health_info["status"] = "error"
-            health_info["error"] = "Unified vector store not initialized"
-            return health_info
-
-        # Check components safely
-        try:
-            # Check MongoDB component
-            if (hasattr(vector_store, 'mongo_store') and
-                vector_store.mongo_store is not None and
-                hasattr(vector_store.mongo_store, '_initialized')):
-
-                mongo_initialized = vector_store.mongo_store._initialized
-                health_info["components"]["mongo_ready"] = mongo_initialized
-
-                # Try to get additional info if initialized
-                if mongo_initialized:
-                    try:
-                        if (hasattr(vector_store.mongo_store, 'db_name') and
-                            vector_store.mongo_store.db_name is not None):
-                            health_info["mongo_details"] = {
-                                "database": vector_store.mongo_store.db_name
-                            }
-                    except Exception:
-                        pass
-
-            # Check Qdrant component
-            if (hasattr(vector_store, 'qdrant_store') and
-                vector_store.qdrant_store is not None and
-                hasattr(vector_store.qdrant_store, '_initialized')):
-
-                qdrant_initialized = vector_store.qdrant_store._initialized
-                health_info["components"]["qdrant_ready"] = qdrant_initialized
-
-                # Try to get additional info if initialized
-                if qdrant_initialized:
-                    try:
-                        if (hasattr(vector_store.qdrant_store, 'collection_name') and
-                            vector_store.qdrant_store.collection_name is not None):
-                            health_info["qdrant_details"] = {
-                                "collection": vector_store.qdrant_store.collection_name
-                            }
-                    except Exception:
-                        pass
-
-            # Get embedding model info
-            if hasattr(vector_store, 'embedding_model'):
-                health_info["embedding_model"] = vector_store.embedding_model
-
-            if hasattr(vector_store, 'embedding_dimension'):
-                health_info["embedding_dimension"] = vector_store.embedding_dimension
-
-            # Get metrics if available
-            if hasattr(vector_store, 'metrics'):
-                health_info["metrics"] = vector_store.metrics
-
-            # Determine overall status
-            if health_info["components"]["mongo_ready"] and health_info["components"]["qdrant_ready"]:
-                health_info["status"] = "ok"
-            elif health_info["components"]["mongo_ready"] or health_info["components"]["qdrant_ready"]:
-                health_info["status"] = "degraded"
-            else:
-                health_info["status"] = "error"
-                health_info["error"] = "No vector store components are ready"
-
-        except Exception as comp_err:
-            health_info["status"] = "error"
-            health_info["error"] = f"Component check failed: {str(comp_err)}"
-
-        return health_info
-
-    except Exception as e:
-        # Handle any other exceptions
-        return {
-            "status": "error",
-            "error": f"Health check failed: {str(e)}",
-            "initialized": getattr(vector_store, "_initialized", False),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-async def get_database_status_async():
-    """Async wrapper for database status check."""
-    # For now, simply call the sync version
-    # This provides a proper awaitable function
-    return get_database_status()
-
 @bp.route("/memory", methods=["GET"])
 @login_required
 def check_memory_manager():
-    """Check memory manager health and stats."""
     try:
         memory_manager = MemoryManager()
         memory_stats = memory_manager.get_stats()
-
         memory_health = {
             "status": "ok",
             "stats": memory_stats,
             "timestamp": datetime.utcnow().isoformat()
         }
-
-        # Try to get a sample of conversations
         try:
             conversation_sample = memory_manager.list_conversations()[:5]
             sample_data = []
-
             for conv in conversation_sample:
                 sample_data.append({
                     "id": conv.conversation_id,
@@ -1096,12 +677,10 @@ def check_memory_manager():
                     "message_count": len(conv.messages),
                     "updated_at": conv.updated_at.isoformat() if hasattr(conv.updated_at, "isoformat") else str(conv.updated_at)
                 })
-
             memory_health["conversation_sample"] = sample_data
         except Exception as sample_error:
             logger.error(f"Error getting conversation sample: {str(sample_error)}")
             memory_health["sample_error"] = str(sample_error)
-
         return jsonify(memory_health)
     except Exception as e:
         logger.error(f"Memory manager health check failed: {str(e)}", exc_info=True)
@@ -1114,9 +693,7 @@ def check_memory_manager():
 @bp.route("/diagnostic", methods=["GET"])
 @login_required
 def run_system_diagnostic():
-    """Run a comprehensive system diagnostic."""
     try:
-        # Start with basic diagnostics
         diagnostic = {
             "timestamp": datetime.utcnow().isoformat(),
             "system": {},
@@ -1125,17 +702,13 @@ def run_system_diagnostic():
             "memory": {},
             "file_storage": {}
         }
-
-        # Check package versions
         import pkg_resources
         python_version = sys.version
-
         try:
             packages = [
                 "flask", "sqlalchemy", "pymongo", "qdrant_client",
                 "openai", "langchain", "langgraph", "boto3"
             ]
-
             package_versions = {}
             for package in packages:
                 try:
@@ -1143,37 +716,27 @@ def run_system_diagnostic():
                     package_versions[package] = version
                 except:
                     package_versions[package] = "not found"
-
             diagnostic["system"]["python_version"] = python_version
             diagnostic["system"]["packages"] = package_versions
         except Exception as pkg_error:
             logger.error(f"Error checking package versions: {str(pkg_error)}")
             diagnostic["system"]["package_error"] = str(pkg_error)
-
-        # Check database connections
-        database_health = check_databases()
+        database_health = get_database_status()
         diagnostic["database"] = database_health
-
-        # Check vector stores health
         try:
             mongo_store = get_mongo_store()
             qdrant_store = get_qdrant_store()
             vector_store = get_vector_store()
-
-            # Basic initialization check
             diagnostic["vector_stores"] = {
                 "mongo_initialized": mongo_store._initialized,
                 "qdrant_initialized": qdrant_store._initialized,
                 "unified_initialized": vector_store._initialized
             }
-
-            # Try a basic test query
             if vector_store._initialized:
                 test_results = vector_store.semantic_search(
                     query="test",
                     k=1
                 )
-
                 diagnostic["vector_stores"]["test_query"] = {
                     "status": "ok",
                     "results": len(test_results)
@@ -1181,8 +744,6 @@ def run_system_diagnostic():
         except Exception as vs_error:
             logger.error(f"Error checking vector stores: {str(vs_error)}")
             diagnostic["vector_stores"]["error"] = str(vs_error)
-
-        # Memory manager check
         try:
             memory_manager = MemoryManager()
             memory_stats = memory_manager.get_stats()
@@ -1190,21 +751,15 @@ def run_system_diagnostic():
         except Exception as mem_error:
             logger.error(f"Error checking memory manager: {str(mem_error)}")
             diagnostic["memory"]["error"] = str(mem_error)
-
-        # File storage check
         try:
             from app.web.files import get_s3_client
             s3_client = get_s3_client()
-
             if s3_client:
                 bucket_name = current_app.config['AWS_BUCKET_NAME']
-
-                # Try to list a few objects
                 response = s3_client.list_objects_v2(
                     Bucket=bucket_name,
                     MaxKeys=5
                 )
-
                 diagnostic["file_storage"] = {
                     "status": "ok",
                     "type": "s3",
@@ -1214,26 +769,17 @@ def run_system_diagnostic():
         except Exception as storage_error:
             logger.error(f"Error checking file storage: {str(storage_error)}")
             diagnostic["file_storage"]["error"] = str(storage_error)
-
-        # Overall health assessment
         health_issues = []
-
-        # Check database
         if isinstance(diagnostic["database"], dict) and diagnostic["database"].get("status") != "ok":
             health_issues.append("Database connectivity issues")
-
-        # Check vector stores
         if not all([
             diagnostic["vector_stores"].get("mongo_initialized", False),
             diagnostic["vector_stores"].get("qdrant_initialized", False),
             diagnostic["vector_stores"].get("unified_initialized", False)
         ]):
             health_issues.append("Vector store initialization issues")
-
-        # Check file storage
         if "error" in diagnostic.get("file_storage", {}):
             health_issues.append("File storage connectivity issues")
-
         if health_issues:
             diagnostic["health_assessment"] = {
                 "status": "issues_detected",
@@ -1250,9 +796,7 @@ def run_system_diagnostic():
                 "status": "healthy",
                 "message": "All systems appear to be functioning correctly"
             }
-
         return jsonify(diagnostic)
-
     except Exception as e:
         logger.error(f"System diagnostic failed: {str(e)}", exc_info=True)
         return jsonify({

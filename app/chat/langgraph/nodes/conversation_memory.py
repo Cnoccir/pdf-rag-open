@@ -13,6 +13,8 @@ from app.chat.utils.extraction import extract_technical_terms
 
 logger = logging.getLogger(__name__)
 
+# app/chat/langgraph/nodes/conversation_memory.py - Improved cycle tracking
+
 def process_conversation_memory(state: GraphState) -> GraphState:
     """
     Process conversation memory and extract technical concepts.
@@ -34,14 +36,16 @@ def process_conversation_memory(state: GraphState) -> GraphState:
     if not state.conversation_state.metadata:
         state.conversation_state.metadata = {}
 
-    # Track cycling to prevent infinite loops
+    # IMPROVED CYCLE TRACKING: Increment first before any other processing
     cycle_count = state.conversation_state.metadata.get("cycle_count", 0)
     state.conversation_state.metadata["cycle_count"] = cycle_count + 1
 
-    logger.info(f"Conversation memory cycle count: {cycle_count + 1}")
+    # Log the cycle count every time for better observability
+    logger.info(f"Conversation memory processing cycle: {cycle_count + 1}")
 
     # CRITICAL FIX: Force end if we've cycled too many times
-    if cycle_count > 3:
+    # Increased from 3 to 10 for more headroom
+    if cycle_count > 10:
         state.conversation_state.metadata["processed_response"] = True
         logger.warning(f"Forcing end of processing after {cycle_count} cycles")
         return state

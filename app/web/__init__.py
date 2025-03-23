@@ -125,9 +125,9 @@ def initialize_vector_stores(app):
 async def async_connection_check(app, vector_store):
     """Check database connections asynchronously."""
     try:
-        health = await vector_store.check_health()
+        # Call synchronously because check_health returns a dict.
+        health = vector_store.check_health()
         app.logger.info(f"Database health check: {health['status']}")
-
         if health['status'] != 'ok':
             app.logger.warning(f"Database health check returned status: {health['status']}")
             if 'mongo_status' in health:

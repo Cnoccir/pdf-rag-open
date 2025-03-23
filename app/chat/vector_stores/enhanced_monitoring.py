@@ -1,6 +1,7 @@
 """
 Enhanced monitoring capabilities for vector stores and conversation management.
 This module provides additional methods for collecting statistics and health checks.
+This version is fully synchronous.
 """
 
 import logging
@@ -17,9 +18,9 @@ class EnhancedMonitoring:
     """
 
     @staticmethod
-    async def get_embedding_stats(self, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    def get_embedding_stats(self, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        Get detailed embedding statistics for documents.
+        Get detailed embedding statistics for documents (synchronous version).
 
         Args:
             pdf_ids: Optional list of PDF IDs to check (default: all documents)
@@ -72,33 +73,30 @@ class EnhancedMonitoring:
                         stats["documents"][pdf_id] = pdf_count.count
 
                         # Get content type breakdown
-                        content_types = await self._get_content_type_counts(pdf_id)
+                        content_types = EnhancedMonitoring._get_content_type_counts(self, pdf_id)
                         for content_type, count in content_types.items():
-                            # Add to global content type counts
                             stats["content_types"][content_type] = stats["content_types"].get(content_type, 0) + count
 
                         # Get chunk level breakdown
-                        chunk_levels = await self._get_chunk_level_counts(pdf_id)
+                        chunk_levels = EnhancedMonitoring._get_chunk_level_counts(self, pdf_id)
                         for chunk_level, count in chunk_levels.items():
-                            # Add to global chunk level counts
                             stats["chunk_levels"][chunk_level] = stats["chunk_levels"].get(chunk_level, 0) + count
 
                         # Get embedding type breakdown
-                        embedding_types = await self._get_embedding_type_counts(pdf_id)
+                        embedding_types = EnhancedMonitoring._get_embedding_type_counts(self, pdf_id)
                         for embedding_type, count in embedding_types.items():
-                            # Add to global embedding type counts
                             stats["embedding_types"][embedding_type] = stats["embedding_types"].get(embedding_type, 0) + count
 
             return stats
 
         except Exception as e:
-            logger.error(f"Error getting embedding stats: {str(e)}")
+            logger.error(f"Error getting embedding stats: {str(e)}", exc_info=True)
             return {"error": str(e)}
 
     @staticmethod
-    async def get_embedding_stats_for_pdf(self, pdf_id: str) -> Dict[str, Any]:
+    def get_embedding_stats_for_pdf(self, pdf_id: str) -> Dict[str, Any]:
         """
-        Get detailed embedding statistics for a specific PDF.
+        Get detailed embedding statistics for a specific PDF (synchronous version).
 
         Args:
             pdf_id: PDF ID to check
@@ -134,13 +132,13 @@ class EnhancedMonitoring:
                 stats["total"] = pdf_count.count
 
                 # Get content type breakdown
-                stats["content_types"] = await self._get_content_type_counts(pdf_id)
+                stats["content_types"] = EnhancedMonitoring._get_content_type_counts(self, pdf_id)
 
                 # Get chunk level breakdown
-                stats["chunk_levels"] = await self._get_chunk_level_counts(pdf_id)
+                stats["chunk_levels"] = EnhancedMonitoring._get_chunk_level_counts(self, pdf_id)
 
                 # Get embedding type breakdown
-                stats["embedding_types"] = await self._get_embedding_type_counts(pdf_id)
+                stats["embedding_types"] = EnhancedMonitoring._get_embedding_type_counts(self, pdf_id)
 
             return stats
 
@@ -149,9 +147,9 @@ class EnhancedMonitoring:
             return {"error": str(e)}
 
     @staticmethod
-    async def _get_content_type_counts(self, pdf_id: str) -> Dict[str, int]:
+    def _get_content_type_counts(self, pdf_id: str) -> Dict[str, int]:
         """
-        Get counts of embeddings by content type for a PDF.
+        Get counts of embeddings by content type for a PDF (synchronous).
 
         Args:
             pdf_id: PDF ID to check
@@ -188,9 +186,9 @@ class EnhancedMonitoring:
         return content_counts
 
     @staticmethod
-    async def _get_chunk_level_counts(self, pdf_id: str) -> Dict[str, int]:
+    def _get_chunk_level_counts(self, pdf_id: str) -> Dict[str, int]:
         """
-        Get counts of embeddings by chunk level for a PDF.
+        Get counts of embeddings by chunk level for a PDF (synchronous).
 
         Args:
             pdf_id: PDF ID to check
@@ -227,9 +225,9 @@ class EnhancedMonitoring:
         return chunk_counts
 
     @staticmethod
-    async def _get_embedding_type_counts(self, pdf_id: str) -> Dict[str, int]:
+    def _get_embedding_type_counts(self, pdf_id: str) -> Dict[str, int]:
         """
-        Get counts of embeddings by embedding type for a PDF.
+        Get counts of embeddings by embedding type for a PDF (synchronous).
 
         Args:
             pdf_id: PDF ID to check
@@ -266,9 +264,9 @@ class EnhancedMonitoring:
         return embedding_counts
 
     @staticmethod
-    async def get_counts_by_filter(self, filter_dict: Dict[str, Any]) -> Dict[str, int]:
+    def get_counts_by_filter(self, filter_dict: Dict[str, Any]) -> Dict[str, int]:
         """
-        Get counts of vectors matching a filter.
+        Get counts of vectors matching a filter (synchronous version).
 
         Args:
             filter_dict: Filter dictionary
@@ -281,33 +279,26 @@ class EnhancedMonitoring:
                 return {"total": 0}
 
         try:
-            # Convert filter_dict to Qdrant filter
-            filter_condition = None
-            if filter_dict:
-                from qdrant_client.http import models
-                conditions = []
-                for key, value in filter_dict.items():
-                    if isinstance(value, list):
-                        conditions.append(
-                            models.FieldCondition(
-                                key=key,
-                                match=models.MatchAny(any=value)
-                            )
+            from qdrant_client.http import models
+            conditions = []
+            for key, value in filter_dict.items():
+                if isinstance(value, list):
+                    conditions.append(
+                        models.FieldCondition(
+                            key=key,
+                            match=models.MatchAny(any=value)
                         )
-                    else:
-                        conditions.append(
-                            models.FieldCondition(
-                                key=key,
-                                match=models.MatchValue(value=value)
-                            )
+                    )
+                else:
+                    conditions.append(
+                        models.FieldCondition(
+                            key=key,
+                            match=models.MatchValue(value=value)
                         )
-
-                if conditions:
-                    filter_condition = models.Filter(
-                        must=conditions
                     )
 
-            # Get count
+            filter_condition = models.Filter(must=conditions) if conditions else None
+
             count_result = self.client.count(
                 collection_name=self.collection_name,
                 count_filter=filter_condition
@@ -349,9 +340,7 @@ class EnhancedMonitoring:
 
             # Get document stats
             if hasattr(self.db, "documents"):
-                # Count documents by metadata fields
                 try:
-                    # Count by category
                     category_pipeline = [
                         {"$group": {"_id": "$category", "count": {"$sum": 1}}},
                         {"$sort": {"count": -1}}
@@ -359,7 +348,6 @@ class EnhancedMonitoring:
                     category_counts = list(self.db.documents.aggregate(category_pipeline))
                     stats["document_stats"]["categories"] = {item["_id"] or "unknown": item["count"] for item in category_counts}
 
-                    # Count by processing status (if field exists)
                     status_pipeline = [
                         {"$group": {"_id": "$processed", "count": {"$sum": 1}}},
                         {"$sort": {"count": -1}}
@@ -370,10 +358,8 @@ class EnhancedMonitoring:
                 except Exception as doc_err:
                     stats["document_stats"]["error"] = str(doc_err)
 
-            # Get concept stats
             if hasattr(self.db, "concepts"):
                 try:
-                    # Count by primary vs regular concepts
                     primary_pipeline = [
                         {"$group": {"_id": "$is_primary", "count": {"$sum": 1}}},
                         {"$sort": {"count": -1}}
@@ -384,7 +370,6 @@ class EnhancedMonitoring:
                         "total": sum(item["count"] for item in primary_counts)
                     }
 
-                    # Get document with most concepts
                     doc_concept_pipeline = [
                         {"$group": {"_id": "$pdf_id", "count": {"$sum": 1}}},
                         {"$sort": {"count": -1}},
@@ -417,35 +402,24 @@ class EnhancedMonitoring:
         }
 
         try:
-            # Get all conversations
             conversations = self.list_conversations()
             stats["conversation_count"] = len(conversations)
-
-            # Count conversations by PDF ID
             pdf_counts = {}
             for conv in conversations:
                 pdf_id = conv.pdf_id
                 if pdf_id:
                     pdf_counts[pdf_id] = pdf_counts.get(pdf_id, 0) + 1
-
-            # Get top PDFs by conversation count
             sorted_pdfs = sorted(pdf_counts.items(), key=lambda x: x[1], reverse=True)
             stats["pdf_distribution"] = {pdf_id: count for pdf_id, count in sorted_pdfs[:10]}
-
-            # Count messages
             message_counts = {"total": 0, "by_type": {}}
             for conv in conversations:
                 for msg in conv.messages:
                     message_counts["total"] += 1
                     msg_type = msg.type.value if hasattr(msg.type, "value") else str(msg.type)
                     message_counts["by_type"][msg_type] = message_counts["by_type"].get(msg_type, 0) + 1
-
             stats["message_counts"] = message_counts
-
-            # Get average messages per conversation
             if stats["conversation_count"] > 0:
                 stats["avg_messages_per_conversation"] = message_counts["total"] / stats["conversation_count"]
-
             return stats
 
         except Exception as e:
@@ -453,28 +427,24 @@ class EnhancedMonitoring:
             return {"error": str(e)}
 
 def enhance_vector_stores():
-    """Connect the enhancement methods to their respective classes."""
-
-    # Import the necessary classes
+    """
+    Connect the enhancement methods to their respective classes.
+    """
     from app.chat.vector_stores.unified_store import UnifiedVectorStore
     from app.chat.vector_stores.qdrant_store import QdrantStore
     from app.chat.vector_stores.mongo_store import MongoStore
     from app.chat.memories.memory_manager import MemoryManager
 
-    # Add methods to UnifiedVectorStore
     UnifiedVectorStore.get_embedding_stats = EnhancedMonitoring.get_embedding_stats
     UnifiedVectorStore.get_embedding_stats_for_pdf = EnhancedMonitoring.get_embedding_stats_for_pdf
     UnifiedVectorStore._get_content_type_counts = EnhancedMonitoring._get_content_type_counts
     UnifiedVectorStore._get_chunk_level_counts = EnhancedMonitoring._get_chunk_level_counts
     UnifiedVectorStore._get_embedding_type_counts = EnhancedMonitoring._get_embedding_type_counts
 
-    # Add methods to QdrantStore
     QdrantStore.get_counts_by_filter = EnhancedMonitoring.get_counts_by_filter
 
-    # Add methods to MongoStore
     MongoStore.get_stats = EnhancedMonitoring.get_mongo_stats
 
-    # Add methods to MemoryManager
     MemoryManager.get_stats = EnhancedMonitoring.get_memory_stats
 
     logger.info("Enhanced vector stores and memory manager with monitoring capabilities")

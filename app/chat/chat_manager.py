@@ -299,10 +299,11 @@ class ChatManager:
         if state.conversation_state and not state.conversation_state.metadata:
             state.conversation_state.metadata = {}
 
-        # Reset cycle count for new query
+        # IMPORTANT: Reset cycle count for new query
         if state.conversation_state and state.conversation_state.metadata:
             state.conversation_state.metadata["cycle_count"] = 0
             state.conversation_state.metadata["processed_response"] = False
+            state.conversation_state.metadata["query_start_time"] = datetime.now().isoformat()
             logger.debug("Reset cycle count and processed_response flag for new query")
 
         # Choose the appropriate graph
@@ -334,10 +335,22 @@ class ChatManager:
                         "conversation_id": self.conversation_id
                     }
 
-            # Run LangGraph
-            logger.info("Invoking LangGraph")
-            result = graph.invoke(state)
-            logger.info("LangGraph processing completed")
+            # Run LangGraph with timeout protection to prevent hanging
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError
+            with ThreadPoolExecutor() as executor:
+                future = executor.submit(graph.invoke, state)
+                try:
+                    # Add a reasonable timeout (30 seconds)
+                    result = future.result(timeout=30)
+                    logger.info("LangGraph processing completed successfully")
+                except TimeoutError:
+                    logger.error("LangGraph processing timed out after 30 seconds")
+                    return {
+                        "status": "error",
+                        "query": query,
+                        "error": "Processing timed out. Your query might be too complex.",
+                        "conversation_id": self.conversation_id
+                    }
 
             # Update conversation state
             if result.conversation_state:
