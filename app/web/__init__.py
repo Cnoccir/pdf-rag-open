@@ -7,18 +7,11 @@ from flask import Flask
 from flask_cors import CORS
 from flask_migrate import Migrate
 from app.web.db import db, init_db_command
+# Keep models import at top level - these are needed by other modules
 from app.web.db import models
 from app.celery import celery_init_app
 from app.web.config import Config
 from app.web.hooks import load_logged_in_user, handle_error, add_headers
-from app.web.views import (
-    auth_views,
-    pdf_views,
-    client_views,
-    conversation_views,
-    stream_views,
-    health_views,
-)
 # Import enhanced RAG monitor
 from app.monitoring.rag_monitor import RAGMonitor
 # Import the async wrapper
@@ -214,6 +207,12 @@ def register_extensions(app):
     app.logger.info('PDF RAG application startup with LangGraph integration and enhanced monitoring')
 
 def register_blueprints(app):
+    # Import blueprints inside the function to avoid circular imports
+    # This is the critical fix for the circular dependency issue
+    from app.web.views import auth_views, pdf_views, client_views
+    from app.web.views import conversation_views
+    from app.web.views import health_views
+
     app.register_blueprint(auth_views.bp)
     app.register_blueprint(pdf_views.bp)
     app.register_blueprint(conversation_views.bp)
@@ -226,6 +225,7 @@ def register_blueprints(app):
     # Stream views are no longer needed as we handle streaming in conversation_views
     # But keep it registered for backward compatibility
     try:
+        from app.web.views import stream_views
         app.register_blueprint(stream_views.bp)
     except Exception as e:
         app.logger.warning(f"Could not register stream views: {str(e)}")

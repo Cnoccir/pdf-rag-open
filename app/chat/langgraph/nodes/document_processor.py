@@ -58,6 +58,41 @@ def process_document(state: GraphState) -> GraphState:
             openai_client=openai_client
         )
 
+        # VERIFICATION STEP: Check if any elements were extracted
+        element_count = len(processing_result.elements) if hasattr(processing_result, 'elements') else 0
+        if element_count == 0:
+            logger.warning(f"No elements extracted from document {pdf_id}")
+            state.document_state["warning"] = "Document processed but no elements extracted"
+
+        # VERIFICATION STEP: Check if embeddings were created
+        vector_store = get_vector_store()
+        if vector_store._initialized:
+            try:
+                # Verify elements were added to vector store
+                # This will be a quick count query to Qdrant
+                embedding_count = 0
+                if hasattr(vector_store.qdrant_store, "client") and vector_store.qdrant_store.client:
+                    count_result = vector_store.qdrant_store.client.count(
+                        collection_name=vector_store.qdrant_store.collection_name,
+                        count_filter={
+                            "must": [
+                                {"key": "pdf_id", "match": {"value": pdf_id}}
+                            ]
+                        }
+                    )
+                    embedding_count = count_result.count
+
+                state.document_state["embedding_count"] = embedding_count
+                if embedding_count == 0 and element_count > 0:
+                    logger.warning(f"Elements extracted but no embeddings created for {pdf_id}")
+                    state.document_state["warning"] = "No embeddings created despite extracting elements"
+            except Exception as vector_err:
+                logger.error(f"Error verifying vector embeddings: {str(vector_err)}")
+                state.document_state["vector_store_error"] = str(vector_err)
+        else:
+            logger.error("Vector store not available for verification")
+            state.document_state["warning"] = "Vector store not available for verification"
+
         # Update database record
         try:
             from app.web.db.models import Pdf
@@ -89,7 +124,9 @@ def process_document(state: GraphState) -> GraphState:
                     pdf.update_metadata({
                         "document_summary": document_summary,
                         "processing_complete": True,
-                        "processing_time": datetime.now().isoformat()
+                        "processing_time": datetime.now().isoformat(),
+                        "element_count": element_count,
+                        "embedding_count": state.document_state.get("embedding_count", 0)
                     })
 
                 # Commit changes
@@ -97,10 +134,9 @@ def process_document(state: GraphState) -> GraphState:
                 logger.info(f"Updated database record for {pdf_id}")
         except Exception as db_error:
             logger.error(f"Error updating database record: {str(db_error)}")
+            state.document_state["db_error"] = str(db_error)
 
         # Update state
-        element_count = len(processing_result.elements) if hasattr(processing_result, 'elements') else 0
-
         state.document_state.update({
             "status": "success",
             "element_count": element_count,

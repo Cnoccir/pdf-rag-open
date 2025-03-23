@@ -4,16 +4,19 @@ Improved graph structure with clear, deterministic routing.
 """
 
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from langgraph.graph import END, StateGraph
 
 from app.chat.langgraph.state import GraphState
 
 logger = logging.getLogger(__name__)
 
-def create_query_graph() -> StateGraph:
+def create_query_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:
     """
     Create a query processing graph for single-document RAG.
+
+    Args:
+        config: Optional configuration dictionary
 
     Returns:
         StateGraph for query processing
@@ -76,9 +79,12 @@ def create_query_graph() -> StateGraph:
     # Compile the graph WITHOUT recursion_limit (which was causing the error)
     return graph.compile()
 
-def create_research_graph() -> StateGraph:
+def create_research_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:
     """
     Create a research graph for multi-document analysis.
+
+    Args:
+        config: Optional configuration dictionary
 
     Returns:
         StateGraph for research processing
@@ -144,9 +150,12 @@ def create_research_graph() -> StateGraph:
     # Compile the graph WITHOUT recursion_limit
     return graph.compile()
 
-def create_document_graph() -> StateGraph:
+def create_document_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:
     """
     Create a document processing graph.
+
+    Args:
+        config: Optional configuration dictionary
 
     Returns:
         StateGraph for document processing
@@ -165,3 +174,6 @@ def create_document_graph() -> StateGraph:
 
     # Compile the graph
     return graph.compile()
+
+# Expose graph creation functions for LangGraph Studio
+__all__ = ["create_query_graph", "create_research_graph", "create_document_graph"]

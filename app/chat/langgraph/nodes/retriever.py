@@ -49,7 +49,12 @@ def retrieve_content(state: GraphState) -> GraphState:
     procedure_focused = state.query_state.procedure_focused
     parameter_query = state.query_state.parameter_query
 
-    logger.info(f"Retrieval started: strategy={retrieval_strategy}, pdf_ids={pdf_ids}")
+    k = 10
+    is_research_mode = len(pdf_ids) > 1
+    if state.query_state.metadata and "research_oriented" in state.query_state.metadata:
+        is_research_mode = is_research_mode or state.query_state.metadata.get("research_oriented", False)
+
+    logger.info(f"Retrieval started: strategy={retrieval_strategy}, pdf_ids={pdf_ids}, research_mode={is_research_mode}")
 
     try:
         # Validate PDF IDs with better error handling

@@ -71,14 +71,15 @@ class MongoStore:
         try:
             self.client = MongoClient(
                 self.uri,
-                serverSelectionTimeoutMS=5000,
-                connectTimeoutMS=5000,
-                socketTimeoutMS=10000,
-                maxPoolSize=100,
-                retryWrites=True
+                serverSelectionTimeoutMS=5000,  # 5-second timeout
+                connectTimeoutMS=5000,          # 5-second connection timeout
+                socketTimeoutMS=10000,          # 10-second socket timeout
+                maxPoolSize=100,                # Connection pool size
+                retryWrites=True                # Retry writes on failure
             )
 
-            self.client.admin.command('ping')  # Verify connection
+            # Verify connection by performing a ping
+            self.client.admin.command('ping')
 
             self.db = self.client[self.db_name]
 
@@ -89,6 +90,7 @@ class MongoStore:
                 if collection_name not in existing_collections:
                     self.db.create_collection(collection_name)
                     logger.info(f"Created collection: {collection_name}")
+
 
             # Index creation
 
@@ -123,9 +125,19 @@ class MongoStore:
             logger.info("MongoDB connection and schema initialized successfully")
             return True
 
+        except ConnectionFailure as e:
+            self.error = f"MongoDB connection failure: {str(e)}"
+            logger.error(self.error)
+            self._initialized = False
+            return False
+        except ServerSelectionTimeoutError as e:
+            self.error = f"MongoDB server selection timeout: {str(e)}"
+            logger.error(self.error)
+            self._initialized = False
+            return False
         except Exception as e:
-            self.error = str(e)
-            logger.error(f"Failed to initialize MongoDB: {str(e)}")
+            self.error = f"MongoDB initialization error: {str(e)}"
+            logger.error(self.error)
 
             if self.client is not None:
                 self.client.close()
@@ -133,7 +145,6 @@ class MongoStore:
 
             self._initialized = False
             return False
-
 
     def create_document_node(
         self,

@@ -1,0 +1,26 @@
+{
+  "dependencies": [
+    "langchain>=0.0.267",
+    "langchain_openai>=0.0.2",
+    "langgraph>=0.0.20",
+    "openai>=1.3.0",
+    "pydantic>=2.0.0",
+    "tiktoken>=0.5.0",
+    "qdrant-client>=1.6.0",
+    "pymongo>=4.5.0",
+    "redis>=5.0.0",
+    "flask>=2.0.0",
+    "sqlalchemy>=2.0.0",
+    "."
+  ],
+  "graphs": {
+    "query_graph": "./app/chat/langgraph/graph.py:create_query_graph",
+    "research_graph": "./app/chat/langgraph/graph.py:create_research_graph",
+    "document_graph": "./app/chat/langgraph/graph.py:create_document_graph"
+  },
+  "env": {
+    "_inherit": true,
+    "_exclude": ["REDIS_URI"]
+  },
+  "python_version": "3.12"
+}

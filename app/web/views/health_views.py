@@ -1,6 +1,5 @@
-# app/web/views/health_views.py
-
 from flask import Blueprint, g, request, jsonify, Response, current_app
+import inspect
 import logging
 import json
 import time
@@ -20,6 +19,124 @@ from qdrant_client.http import models
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("health", __name__, url_prefix="/api/health")
+
+def get_database_status():
+    """Get database connections and status data."""
+    try:
+        # Get current database status
+        mongo_store = get_mongo_store()
+        qdrant_store = get_qdrant_store()
+        vector_store = get_vector_store()
+
+        # Check initialization status
+        db_status = {
+            "mongo": {
+                "initialized": mongo_store._initialized,
+                "status": "ok" if mongo_store._initialized else "error"
+            },
+            "qdrant": {
+                "initialized": qdrant_store._initialized,
+                "status": "ok" if qdrant_store._initialized else "error"
+            },
+            "vector_store": {
+                "initialized": vector_store._initialized,
+                "status": "ok" if vector_store._initialized else "error"
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        # Check if we should attempt initialization
+        force_init = False  # Default value when not in request context
+
+        # If in request context, get from request args
+        if request:
+            force_init = request.args.get("force_init", "").lower() == "true"
+
+        if force_init or not all([
+            mongo_store._initialized,
+            qdrant_store._initialized,
+            vector_store._initialized
+        ]):
+            logger.info("Attempting database initialization")
+
+            # Try initializing MongoDB
+            if not mongo_store._initialized:
+                mongo_init_success = mongo_store.initialize()
+                db_status["mongo"]["initialization_attempted"] = True
+                db_status["mongo"]["initialization_success"] = mongo_init_success
+                if mongo_init_success:
+                    db_status["mongo"]["status"] = "ok"
+                    db_status["mongo"]["initialized"] = True
+
+            # Try initializing Qdrant
+            if not qdrant_store._initialized:
+                qdrant_init_success = qdrant_store.initialize()
+                db_status["qdrant"]["initialization_attempted"] = True
+                db_status["qdrant"]["initialization_success"] = qdrant_init_success
+                if qdrant_init_success:
+                    db_status["qdrant"]["status"] = "ok"
+                    db_status["qdrant"]["initialized"] = True
+
+            # Try initializing Vector Store
+            if not vector_store._initialized:
+                vector_init_success = vector_store.initialize()
+                db_status["vector_store"]["initialization_attempted"] = True
+                db_status["vector_store"]["initialization_success"] = vector_init_success
+                if vector_init_success:
+                    db_status["vector_store"]["status"] = "ok"
+                    db_status["vector_store"]["initialized"] = True
+
+        # Get MongoDB stats if initialized
+        if mongo_store._initialized:
+            try:
+                mongo_stats = mongo_store.get_stats()
+                db_status["mongo"]["stats"] = mongo_stats
+            except Exception as mongo_error:
+                logger.error(f"Error getting MongoDB stats: {str(mongo_error)}")
+                db_status["mongo"]["stats_error"] = str(mongo_error)
+
+        # Get vector counts from Qdrant if initialized
+        if qdrant_store._initialized and qdrant_store.client:
+            try:
+                collection_count = qdrant_store.client.count(
+                    collection_name=qdrant_store.collection_name,
+                    count_filter=None
+                )
+                db_status["qdrant"]["vector_count"] = collection_count.count
+
+                # Get collection info
+                collection_info = qdrant_store.client.get_collection(qdrant_store.collection_name)
+                db_status["qdrant"]["collection_info"] = {
+                    "name": qdrant_store.collection_name,
+                    "dimension": collection_info.config.params.vectors.size,
+                    "distance": str(collection_info.config.params.vectors.distance),
+                }
+            except Exception as qdrant_error:
+                logger.error(f"Error getting Qdrant stats: {str(qdrant_error)}")
+                db_status["qdrant"]["stats_error"] = str(qdrant_error)
+
+        # Check overall database status
+        all_initialized = all([
+            db_status["mongo"]["initialized"],
+            db_status["qdrant"]["initialized"],
+            db_status["vector_store"]["initialized"]
+        ])
+
+        # Return the raw dictionary (not a Flask response)
+        return {
+            "status": "ok" if all_initialized else "degraded",
+            "databases": db_status,
+            "all_initialized": all_initialized,
+        }
+
+    except Exception as e:
+        logger.error(f"Database status check failed: {str(e)}", exc_info=True)
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "timestamp": datetime.utcnow().isoformat()
+        }
 
 @bp.route("/", methods=["GET"])
 def check_health():
@@ -56,8 +173,8 @@ def check_system():
             "components": {}
         }
 
-        # Check database connections
-        db_status = check_databases()
+        # Update this line to use the helper function
+        db_status = get_database_status()
         health_data["components"]["databases"] = db_status
 
         # Check memory manager
@@ -162,123 +279,11 @@ def check_system():
 @bp.route("/databases", methods=["GET"])
 @login_required
 def check_databases():
-    """Check database connections and status."""
-    try:
-        # Get current database status
-        mongo_store = get_mongo_store()
-        qdrant_store = get_qdrant_store()
-        vector_store = get_vector_store()
-
-        # Check initialization status
-        db_status = {
-            "mongo": {
-                "initialized": mongo_store._initialized,
-                "status": "ok" if mongo_store._initialized else "error"
-            },
-            "qdrant": {
-                "initialized": qdrant_store._initialized,
-                "status": "ok" if qdrant_store._initialized else "error"
-            },
-            "vector_store": {
-                "initialized": vector_store._initialized,
-                "status": "ok" if vector_store._initialized else "error"
-            },
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        # Check if we should attempt initialization
-        force_init = request.args.get("force_init", "").lower() == "true"
-        if force_init or not all([
-            mongo_store._initialized,
-            qdrant_store._initialized,
-            vector_store._initialized
-        ]):
-            logger.info("Attempting database initialization")
-
-            # Try initializing MongoDB
-            if not mongo_store._initialized:
-                mongo_init_success = mongo_store.initialize()
-                db_status["mongo"]["initialization_attempted"] = True
-                db_status["mongo"]["initialization_success"] = mongo_init_success
-                if mongo_init_success:
-                    db_status["mongo"]["status"] = "ok"
-                    db_status["mongo"]["initialized"] = True
-
-            # Try initializing Qdrant
-            if not qdrant_store._initialized:
-                qdrant_init_success = qdrant_store.initialize()
-                db_status["qdrant"]["initialization_attempted"] = True
-                db_status["qdrant"]["initialization_success"] = qdrant_init_success
-                if qdrant_init_success:
-                    db_status["qdrant"]["status"] = "ok"
-                    db_status["qdrant"]["initialized"] = True
-
-            # Try initializing Vector Store
-            if not vector_store._initialized:
-                vector_init_success = vector_store.initialize()
-                db_status["vector_store"]["initialization_attempted"] = True
-                db_status["vector_store"]["initialization_success"] = vector_init_success
-                if vector_init_success:
-                    db_status["vector_store"]["status"] = "ok"
-                    db_status["vector_store"]["initialized"] = True
-
-        # Get MongoDB stats if initialized
-        if mongo_store._initialized:
-            try:
-                mongo_stats = mongo_store.get_stats()
-                db_status["mongo"]["stats"] = mongo_stats
-            except Exception as mongo_error:
-                logger.error(f"Error getting MongoDB stats: {str(mongo_error)}")
-                db_status["mongo"]["stats_error"] = str(mongo_error)
-
-        # Get vector counts from Qdrant if initialized
-        if qdrant_store._initialized and qdrant_store.client:
-            try:
-                collection_count = qdrant_store.client.count(
-                    collection_name=qdrant_store.collection_name,
-                    count_filter=None
-                )
-                db_status["qdrant"]["vector_count"] = collection_count.count
-
-                # Get collection info
-                collection_info = qdrant_store.client.get_collection(qdrant_store.collection_name)
-                db_status["qdrant"]["collection_info"] = {
-                    "name": qdrant_store.collection_name,
-                    "dimension": collection_info.config.params.vectors.size,
-                    "distance": str(collection_info.config.params.vectors.distance),
-                }
-            except Exception as qdrant_error:
-                logger.error(f"Error getting Qdrant stats: {str(qdrant_error)}")
-                db_status["qdrant"]["stats_error"] = str(qdrant_error)
-
-        # Check overall database status
-        all_initialized = all([
-            db_status["mongo"]["initialized"],
-            db_status["qdrant"]["initialized"],
-            db_status["vector_store"]["initialized"]
-        ])
-
-        if request.path == "/api/health/databases":  # Only for direct endpoint access
-            return jsonify({
-                "status": "ok" if all_initialized else "degraded",
-                "databases": db_status,
-                "all_initialized": all_initialized,
-            })
-
-        return db_status
-
-    except Exception as e:
-        error_response = {
-            "status": "error",
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-        if request.path == "/api/health/databases":  # Only for direct endpoint access
-            return jsonify(error_response), 500
-
-        return error_response
+    """Database health check endpoint."""
+    # Get database status
+    status_data = get_database_status()
+    # Return as JSON response
+    return jsonify(status_data)
 
 @bp.route("/pdf/<string:pdf_id>", methods=["GET"])
 @login_required
@@ -745,19 +750,30 @@ async def check_vector_stores():
             "unified": {"status": "checking"}
         }
 
-        # Call the health check functions directly with await
-        health_info["mongo"] = await async_check_mongo_health(mongo_store)
-        health_info["qdrant"] = await async_check_qdrant_health(qdrant_store)
-        health_info["unified"] = await async_check_unified_health(vector_store)
+        # Call the health check functions with correct async handling
+        if inspect.iscoroutinefunction(mongo_store.check_health):
+            health_info["mongo"] = await mongo_store.check_health()
+        else:
+            health_info["mongo"] = mongo_store.check_health()
 
-        # Determine overall status
-        if (health_info["mongo"]["status"] == "ok" and
-            health_info["qdrant"]["status"] == "ok" and
-            health_info["unified"]["status"] == "ok"):
+        if inspect.iscoroutinefunction(qdrant_store.check_health):
+            health_info["qdrant"] = await qdrant_store.check_health()
+        else:
+            health_info["qdrant"] = qdrant_store.check_health()
+
+        if inspect.iscoroutinefunction(vector_store.check_health):
+            health_info["unified"] = await vector_store.check_health()
+        else:
+            health_info["unified"] = vector_store.check_health()
+
+        # Determine overall status using .get() for safe access
+        if (health_info["mongo"].get("status") == "ok" and
+            health_info["qdrant"].get("status") == "ok" and
+            health_info["unified"].get("status") == "ok"):
             health_info["status"] = "ok"
-        elif (health_info["mongo"]["status"] == "error" or
-              health_info["qdrant"]["status"] == "error" or
-              health_info["unified"]["status"] == "error"):
+        elif (health_info["mongo"].get("status") == "error" or
+              health_info["qdrant"].get("status") == "error" or
+              health_info["unified"].get("status") == "error"):
             health_info["status"] = "error"
         else:
             health_info["status"] = "degraded"
@@ -1046,7 +1062,13 @@ async def async_check_unified_health(vector_store):
             "initialized": getattr(vector_store, "_initialized", False),
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
+async def get_database_status_async():
+    """Async wrapper for database status check."""
+    # For now, simply call the sync version
+    # This provides a proper awaitable function
+    return get_database_status()
+
 @bp.route("/memory", methods=["GET"])
 @login_required
 def check_memory_manager():
