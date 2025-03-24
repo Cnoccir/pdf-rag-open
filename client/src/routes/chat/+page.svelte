@@ -1,19 +1,23 @@
 <script lang="ts">
 	import { beforeNavigate } from '$app/navigation';
-	import { resetAll, sendMessage } from '$s/chat/index';
+	import { resetAll, safeSendMessage } from '$s/chat/index';
 	import ChatPanel from '$c/chat/ChatPanel.svelte';
+	import { onMount } from 'svelte';
 
 	beforeNavigate(resetAll);
 
+	// Use our safer message sending implementation
 	function handleSubmit(content: string, useStreaming: boolean, useResearch: boolean) {
-		sendMessage({
-			role: 'user',
-			content,
-			metadata: useResearch ? { research_mode: true } : undefined
-		}, {
-			useStreaming
+		safeSendMessage(content, {
+			useStreaming,
+			useResearch,
 		});
 	}
+
+	// Add error handling for component initialization
+	onMount(() => {
+		console.log("Chat page mounted successfully");
+	});
 </script>
 
 <div class="chat-panel-wrapper">

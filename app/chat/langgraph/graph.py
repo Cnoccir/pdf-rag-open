@@ -1,13 +1,13 @@
 """
 LangGraph workflow definition for the PDF RAG system.
-Improved graph structure with clear, deterministic routing.
+Improved graph structure with clear, deterministic routing and proper input mapping.
 """
 
 import logging
 from typing import Dict, Any, List, Optional
 from langgraph.graph import END, StateGraph
 
-from app.chat.langgraph.state import GraphState
+from app.chat.langgraph.state import GraphState, QueryState, RetrievalStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,54 @@ def create_query_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:
 
     # Create graph
     graph = StateGraph(GraphState)
+
+    # Define input mapper function to correctly handle direct invocations
+    def map_input_to_state(input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Map raw input to proper GraphState structure.
+        Handles both direct invocations and internal calls.
+        """
+        logger.info(f"Mapping input: {input_data}")
+
+        # Handle different possible input structures
+        query = input_data.get("question", input_data.get("query", ""))
+        pdf_id = input_data.get("pdf_id", "")
+        pdf_ids = input_data.get("pdf_ids", [])
+
+        # Ensure pdf_id is included in pdf_ids if provided
+        if pdf_id and not pdf_ids:
+            pdf_ids = [pdf_id]
+
+        # Extract conversation_id if present (for memory retrieval)
+        conversation_id = input_data.get("conversation_id")
+
+        # Create query state
+        query_state = QueryState(
+            query=query,
+            pdf_ids=pdf_ids,
+            retrieval_strategy=RetrievalStrategy.HYBRID  # Default strategy
+        )
+
+        # Create a minimal conversation state if needed
+        conversation_state = None
+        if conversation_id:
+            from app.chat.langgraph.state import ConversationState
+            conversation_state = ConversationState(
+                conversation_id=conversation_id,
+                pdf_id=pdf_id if pdf_id else "",
+                metadata={"input_mapped": True}
+            )
+
+        # Return structured state for graph
+        result = {"query_state": query_state}
+        if conversation_state:
+            result["conversation_state"] = conversation_state
+
+        logger.info(f"Mapped input to: {result}")
+        return result
+
+    # Set input mapper for the graph
+    graph.set_input_mapper(map_input_to_state)
 
     # Add nodes
     graph.add_node("conversation_memory", process_conversation_memory)
@@ -114,6 +162,54 @@ def create_research_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph
     # Create graph
     graph = StateGraph(GraphState)
 
+    # Use the same input mapper as the query graph for consistency
+    def map_input_to_state(input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Map raw input to proper GraphState structure.
+        Handles both direct invocations and internal calls.
+        """
+        logger.info(f"Mapping input for research graph: {input_data}")
+
+        # Handle different possible input structures
+        query = input_data.get("question", input_data.get("query", ""))
+        pdf_id = input_data.get("pdf_id", "")
+        pdf_ids = input_data.get("pdf_ids", [])
+
+        # Ensure pdf_id is included in pdf_ids if provided
+        if pdf_id and not pdf_ids:
+            pdf_ids = [pdf_id]
+
+        # Extract conversation_id if present (for memory retrieval)
+        conversation_id = input_data.get("conversation_id")
+
+        # Create query state
+        query_state = QueryState(
+            query=query,
+            pdf_ids=pdf_ids,
+            retrieval_strategy=RetrievalStrategy.HYBRID  # Default strategy
+        )
+
+        # Create a minimal conversation state if needed
+        conversation_state = None
+        if conversation_id:
+            from app.chat.langgraph.state import ConversationState
+            conversation_state = ConversationState(
+                conversation_id=conversation_id,
+                pdf_id=pdf_id if pdf_id else "",
+                metadata={"input_mapped": True, "research_mode": True}
+            )
+
+        # Return structured state for graph
+        result = {"query_state": query_state}
+        if conversation_state:
+            result["conversation_state"] = conversation_state
+
+        logger.info(f"Mapped research input to: {result}")
+        return result
+
+    # Set input mapper for the graph
+    graph.set_input_mapper(map_input_to_state)
+
     # Add nodes
     graph.add_node("conversation_memory", process_conversation_memory)
     graph.add_node("query_analyzer", analyze_query)
@@ -163,7 +259,7 @@ def create_research_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph
 
     graph.add_conditional_edges("conversation_memory", should_end)
 
-    # Compile the graph - no recursion_limit parameter in this version
+    # Compile the graph
     return graph.compile()
 
 def create_document_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph:
@@ -181,6 +277,32 @@ def create_document_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph
     # Create graph
     graph = StateGraph(GraphState)
 
+    # Define document-specific input mapper
+    def map_input_to_state(input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Map document processing input to proper GraphState structure.
+        """
+        logger.info(f"Mapping document input: {input_data}")
+
+        # Extract PDF ID
+        pdf_id = input_data.get("pdf_id", "")
+        if not pdf_id:
+            logger.error("No PDF ID provided for document processing")
+            return {"document_state": {"error": "No PDF ID provided"}}
+
+        # Create document state
+        document_state = {"pdf_id": pdf_id}
+
+        # Add additional configuration if provided
+        if "config" in input_data:
+            document_state["config"] = input_data["config"]
+
+        logger.info(f"Mapped document input to state with pdf_id: {pdf_id}")
+        return {"document_state": document_state}
+
+    # Set input mapper for the document graph
+    graph.set_input_mapper(map_input_to_state)
+
     # Add nodes
     graph.add_node("document_processor", process_document)
 
@@ -188,7 +310,7 @@ def create_document_graph(config: Optional[Dict[str, Any]] = None) -> StateGraph
     graph.set_entry_point("document_processor")
     graph.add_edge("document_processor", END)
 
-    # Compile the graph - no recursion_limit parameter in this version
+    # Compile the graph
     return graph.compile()
 
 # Expose graph creation functions for LangGraph Studio

@@ -1,15 +1,17 @@
 """
 Conversation memory node for LangGraph-based PDF RAG system.
 Handles conversation history management and technical concept extraction.
+Enhanced to handle direct invocations from LangGraph Studio.
 """
 
 import logging
 import re
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from datetime import datetime
 
-from app.chat.langgraph.state import GraphState, MessageType
+from app.chat.langgraph.state import GraphState, MessageType, ConversationState
 from app.chat.utils.extraction import extract_technical_terms
+from app.chat.memories.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +19,7 @@ def process_conversation_memory(state: GraphState) -> dict:
     """
     Process conversation memory and extract technical concepts.
     Maintains conversation context and tracks message history.
+    Enhanced to handle direct invocations from LangGraph Studio.
 
     Args:
         state: Current graph state
@@ -26,9 +29,25 @@ def process_conversation_memory(state: GraphState) -> dict:
     """
     # Initialize conversation state if not present
     if not state.conversation_state:
-        logger.warning("No conversation state found, creating new one")
-        from app.chat.langgraph.state import ConversationState
+        logger.info("No conversation state found, creating new one")
         state.conversation_state = ConversationState()
+
+    # Check if this is a direct invocation with a conversation ID
+    if state.conversation_state and state.conversation_state.conversation_id and state.conversation_state.metadata and state.conversation_state.metadata.get("input_mapped"):
+        logger.info(f"Direct invocation detected with conversation ID: {state.conversation_state.conversation_id}")
+
+        # Try to load existing conversation from memory manager
+        try:
+            memory_manager = MemoryManager()
+            loaded_conversation = memory_manager.get_conversation(state.conversation_state.conversation_id)
+
+            if loaded_conversation:
+                logger.info(f"Loaded existing conversation with {len(loaded_conversation.messages)} messages")
+                state.conversation_state = loaded_conversation
+            else:
+                logger.info("No existing conversation found, using new conversation state")
+        except Exception as e:
+            logger.error(f"Error loading conversation: {str(e)}")
 
     # Initialize metadata to track processing status
     if not state.conversation_state.metadata:
@@ -143,5 +162,14 @@ def process_conversation_memory(state: GraphState) -> dict:
 
     # Store conversation update timestamp
     state.conversation_state.updated_at = datetime.now()
+
+    # Save the conversation state to the memory manager
+    try:
+        if state.conversation_state.conversation_id:
+            memory_manager = MemoryManager()
+            memory_manager.save_conversation(state.conversation_state)
+            logger.debug(f"Saved conversation state to memory manager: {state.conversation_state.conversation_id}")
+    except Exception as e:
+        logger.warning(f"Error saving conversation to memory manager: {str(e)}")
 
     return {"conversation_state": state.conversation_state}

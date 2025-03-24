@@ -21,6 +21,22 @@
   let fallbackProgress = 0;
   let finishedInitialMessages = false;
 
+  // Stage to icon mapping
+  const stageIcons = {
+    "initialization": "settings",
+    "preparation": "library_books",
+    "connection": "cloud_sync",
+    "database_ready": "database",
+    "query_analyzer": "search",
+    "retriever": "find_in_page",
+    "research_synthesizer": "compare",
+    "knowledge_generator": "psychology",
+    "response_generator": "rate_review",
+    "finalizing": "check_circle",
+    "complete": "done_all",
+    "error": "error"
+  };
+
   function typewriterEffect(message: string, index = 0) {
     if (index < message.length) {
       displayedMessage = message.slice(0, index + 1);
@@ -65,6 +81,9 @@
 
   // Get actual progress percentage to display
   $: displayProgress = progress.active ? progress.percentage : fallbackProgress;
+
+  // Get appropriate icon for current stage
+  $: stageIcon = progress.active && progress.stage ? stageIcons[progress.stage] || "sync" : "sync";
 </script>
 
 <div class="pending-message" transition:fade={{ duration: 300 }}>
@@ -82,17 +101,38 @@
   <div class="message-content">
     <div class="process-info">
       {#if progress.active}
-        <span class="stage-badge">{progress.stage}</span>
+        <div class="stage-indicator">
+          <span class="stage-icon material-icons">{stageIcon}</span>
+          <span class="stage-badge">{progress.stage || "Processing"}</span>
+        </div>
       {/if}
       <div class="message">{progress.active ? progress.message : displayedMessage}</div>
     </div>
-    <div class="progress-container">
-      <div class="progress-bar">
-        <div class="progress" style="width: {displayProgress}%"></div>
+
+    <!-- Processing stages visualization -->
+    <div class="stages-container">
+      <div class="stages">
+        <div class="stage {progress.stage === 'query_analyzer' ? 'active' : (displayProgress > 25 ? 'completed' : '')}">
+          <span class="stage-dot"></span>
+          <span class="stage-label">Analyzing</span>
+        </div>
+        <div class="stage {progress.stage === 'retriever' ? 'active' : (displayProgress > 50 ? 'completed' : '')}">
+          <span class="stage-dot"></span>
+          <span class="stage-label">Searching</span>
+        </div>
+        <div class="stage {['knowledge_generator', 'research_synthesizer'].includes(progress.stage) ? 'active' : (displayProgress > 70 ? 'completed' : '')}">
+          <span class="stage-dot"></span>
+          <span class="stage-label">Processing</span>
+        </div>
+        <div class="stage {progress.stage === 'response_generator' ? 'active' : (displayProgress > 85 ? 'completed' : '')}">
+          <span class="stage-dot"></span>
+          <span class="stage-label">Responding</span>
+        </div>
+        <div class="stage {progress.stage === 'finalizing' || progress.stage === 'complete' ? 'active' : (displayProgress >= 100 ? 'completed' : '')}">
+          <span class="stage-dot"></span>
+          <span class="stage-label">Finishing</span>
+        </div>
       </div>
-      {#if displayProgress > 0}
-        <div class="progress-percentage">{Math.round(displayProgress)}%</div>
-      {/if}
     </div>
   </div>
 </div>
@@ -140,6 +180,17 @@
     margin-bottom: 12px;
   }
 
+  .stage-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .stage-icon {
+    font-size: 16px;
+    color: #4a63ee;
+  }
+
   .stage-badge {
     display: inline-block;
     padding: 3px 8px;
@@ -150,6 +201,7 @@
     font-weight: 600;
     align-self: flex-start;
     margin-bottom: 4px;
+    text-transform: capitalize;
   }
 
   .message {
@@ -158,31 +210,75 @@
     font-weight: 500;
   }
 
-  .progress-container {
+  /* New stages visualization */
+  .stages-container {
+    margin: 16px 0;
+  }
+
+  .stages {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    justify-content: space-between;
+    position: relative;
+    margin-bottom: 8px;
   }
 
-  .progress-bar {
-    flex-grow: 1;
+  .stages:before {
+    content: '';
+    position: absolute;
+    top: 8px;
+    left: 10px;
+    right: 10px;
+    height: 2px;
     background-color: #e2e8f0;
-    height: 4px;
-    border-radius: 2px;
-    overflow: hidden;
+    z-index: 1;
   }
 
-  .progress {
+  .stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative;
+    z-index: 2;
+  }
+
+  .stage-dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background-color: #e2e8f0;
+    border: 2px solid #f8fafc;
+    margin-bottom: 4px;
+  }
+
+  .stage.active .stage-dot {
     background-color: #4a63ee;
-    height: 100%;
-    border-radius: 2px;
-    transition: width 0.4s ease-in-out;
+    box-shadow: 0 0 0 3px rgba(74, 99, 238, 0.2);
+    animation: pulse-dot 1.5s infinite;
   }
 
-  .progress-percentage {
-    font-size: 12px;
-    color: #6b7280;
-    min-width: 32px;
-    text-align: right;
+  .stage.completed .stage-dot {
+    background-color: #10b981;
   }
+
+  @keyframes pulse-dot {
+    0% { box-shadow: 0 0 0 0 rgba(74, 99, 238, 0.5); }
+    70% { box-shadow: 0 0 0 6px rgba(74, 99, 238, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(74, 99, 238, 0); }
+  }
+
+  .stage-label {
+    font-size: 10px;
+    font-weight: 500;
+    color: #6b7280;
+  }
+
+  .stage.active .stage-label {
+    color: #4a63ee;
+    font-weight: 600;
+  }
+
+  .stage.completed .stage-label {
+    color: #10b981;
+  }
+
 </style>

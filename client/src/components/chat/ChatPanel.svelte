@@ -61,9 +61,89 @@
       showRegenerateButton = false; // Hide regenerate button while submitting
 
       try {
-        await sendMessage(message, { useStreaming, useResearch });
+        // Create a properly structured message object
+        const messageObj = {
+          role: 'user',
+          content: message,
+          metadata: useResearch ? { research_mode: true } : undefined
+        };
+
+        // Use a try-catch to handle any Immer errors
+        try {
+          // Create options with only the necessary fields
+          const options = {
+            useStreaming,
+            useResearch
+          };
+
+          // Use sendMessage from the store
+          await sendMessage(messageObj, options);
+        } catch (error) {
+          console.error("Error sending message:", error);
+
+          // Use a safer alternative approach to update the store - direct API call if store update fails
+          try {
+            if ($store.activeConversationId) {
+              // Add message manually to UI first for better UX
+              store.update(s => {
+                // Create a totally new state to avoid Immer issues
+                const newState = JSON.parse(JSON.stringify(s));
+
+                // Find the conversation
+                const conv = newState.conversations.find(c => c.id === newState.activeConversationId);
+                if (conv) {
+                  // Add the message
+                  if (!Array.isArray(conv.messages)) {
+                    conv.messages = [];
+                  }
+
+                  conv.messages.push({
+                    role: 'user',
+                    content: message,
+                    id: Date.now()
+                  });
+
+                  // Add a pending message
+                  conv.messages.push({
+                    role: 'pending',
+                    content: '',
+                    id: Date.now() + 1
+                  });
+                }
+
+                return newState;
+              });
+
+              // Make a direct API call
+              const result = await fetch(`/api/conversations/${$store.activeConversationId}/messages`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  input: message,
+                  useResearch,
+                  useStreaming
+                })
+              });
+
+              // Process the response
+              if (result.ok) {
+                // Success - refresh the conversation
+                fetchConversations(documentId);
+              } else {
+                // Error handling
+                const errorData = await result.json();
+                console.error("API error:", errorData);
+                store.update(s => ({ ...s, error: errorData.error || "Failed to send message" }));
+              }
+            }
+          } catch (fallbackError) {
+            console.error("Fallback error:", fallbackError);
+          }
+        }
       } catch (error) {
-        console.error("Error sending message:", error);
+        console.error("Top-level error sending message:", error);
         showRegenerateButton = true; // Show regenerate button on error
       } finally {
         isSubmitting = false; // Reset flag when done

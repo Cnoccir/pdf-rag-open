@@ -454,6 +454,7 @@ def generate_procedure_response(state: GraphState) -> dict:
 def format_retrieved_content(elements: List[Dict[str, Any]]) -> tuple:
     """
     Format retrieved content for the prompt with enhanced chunk information.
+    Improved to prioritize meaningful content and filter out low-value elements.
 
     Args:
         elements: Retrieved elements
@@ -464,15 +465,28 @@ def format_retrieved_content(elements: List[Dict[str, Any]]) -> tuple:
     content_str = ""
     citation_map = {}
 
+    # Filter out very short or meaningless elements
+    filtered_elements = []
+    for element in elements:
+        content = element.get("content", "")
+        # Skip extremely short elements or empty content
+        if len(content.strip()) < 15:
+            continue
+        # Check if the content is just a label or header
+        if element.get("content_type") == "ContentType.TEXT" and len(content.split()) < 4:
+            continue
+        # Add to filtered list
+        filtered_elements.append(element)
+
     # Sort elements by score if available
     sorted_elements = sorted(
-        elements,
+        filtered_elements,
         key=lambda x: x.get("metadata", {}).get("score", 0) if isinstance(x.get("metadata"), dict) else 0,
         reverse=True
     )
 
     # Limit to most relevant elements
-    elements_to_use = sorted_elements[:12]
+    elements_to_use = sorted_elements[:10]  # Reduced from 12 to focus on quality
 
     for i, element in enumerate(elements_to_use):
         # Create citation ID
@@ -499,7 +513,8 @@ def format_retrieved_content(elements: List[Dict[str, Any]]) -> tuple:
             "page": page,
             "document_title": document_title,
             "chunk_level": chunk_level,
-            "embedding_type": embedding_type
+            "embedding_type": embedding_type,
+            "content": element.get("content", "")[:100]  # Store a preview of content for filtering
         }
 
         # Format section info if available
@@ -661,6 +676,7 @@ def format_research_insights(research_state: Any) -> str:
 def extract_citations(response_text: str, citation_map: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Extract citations from the response text.
+    Enhanced to filter out low-value citations.
 
     Args:
         response_text: Generated response text
@@ -681,6 +697,19 @@ def extract_citations(response_text: str, citation_map: Dict[str, Any]) -> List[
 
         if citation_id in citation_map:
             citation_data = citation_map[citation_id].copy()
+
+            # Check if this citation has valuable content
+            content_length = 0
+            if "content" in citation_data:
+                content_length = len(citation_data["content"])
+
+            # Filter out low-value citations - skip very short content
+            if content_length < 20:
+                continue
+
+            # Skip elements with very low scores
+            if citation_data.get("score", 1.0) < 0.1:
+                continue
 
             # Check if already added (avoid duplicates)
             if not any(c.get("id") == citation_data.get("id") for c in citations):

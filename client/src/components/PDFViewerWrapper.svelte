@@ -551,5 +551,9 @@
         .mobile-view.expanded {
             transform: translateY(0);
         }
+        .pdf-viewer-container {
+          --scale-factor: 1.0;
+        }
+
     }
 </style>

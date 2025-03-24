@@ -119,12 +119,16 @@ const getRawMessages = () => {
     });
 };
 
-// Insert message to active conversation
+// Insert message to active conversation with improved Immer handling
 const insertMessageToActive = (message: Message) => {
-  store.update((s) => {
-    const conv = s.conversations.find((c) => c.id === s.activeConversationId);
+  store.update((state) => {
+    // Create a fully new state object to avoid Immer's frozen state issues
+    const newState = JSON.parse(JSON.stringify(state));
+
+    // Find the active conversation
+    const conv = newState.conversations.find((c) => c.id === newState.activeConversationId);
     if (!conv) {
-      return s;
+      return newState;
     }
 
     // Ensure messages array is initialized
@@ -132,27 +136,39 @@ const insertMessageToActive = (message: Message) => {
       conv.messages = [];
     }
 
-    conv.messages.push(message);
-    return s;
+    // Clone the message before pushing
+    const messageCopy = { ...message };
+    if (!messageCopy.id) {
+      messageCopy.id = Date.now() + Math.random();
+    }
+
+    // Add to the messages array
+    conv.messages.push(messageCopy);
+
+    return newState;
   });
 };
-
-// Remove message from active conversation
+// Also update the removeMessageFromActive function
 const removeMessageFromActive = (id: string | number) => {
-  store.update((s) => {
-    const conv = s.conversations.find((c) => c.id === s.activeConversationId);
+  store.update((state) => {
+    // Create a new state to avoid Immer issues
+    const newState = JSON.parse(JSON.stringify(state));
+
+    const conv = newState.conversations.find((c) => c.id === newState.activeConversationId);
     if (!conv) {
-      return s;
+      return newState;
     }
 
-    // Ensure messages array is initialized
+    // Check if messages array exists
     if (!Array.isArray(conv.messages)) {
       conv.messages = [];
-      return s;
+      return newState;
     }
 
+    // Filter out the message to remove
     conv.messages = conv.messages.filter((m) => m.id !== id);
-    return s;
+
+    return newState;
   });
 };
 

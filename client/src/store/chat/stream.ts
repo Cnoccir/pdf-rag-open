@@ -1,46 +1,38 @@
 import { get } from 'svelte/store';
 import type { Message, MessageOpts } from './store';
-import { set, store, getActiveConversation, insertMessageToActive, updateResearchModeFromActiveConversation } from './store';
+import { store, set, getActiveConversation, updateResearchModeFromActiveConversation } from './store';
 import { addError } from '$s/errors';
 import { getErrorMessage } from '$api';
 import { processStreamText, type StreamChunk } from '../../utils/streamParser';
+import { safeAddMessage, safeUpdateMessage, safeRemoveMessage } from './utils';
 
+// Use the safer implementation for adding messages
 const _addMessage = (message: Message) => {
-  insertMessageToActive(message);
+  safeAddMessage(message);
 };
 
+// Use the safer implementation for appending responses
 const _appendResponse = (id: number, text: string) => {
-  store.update((state) => {
-    const conv = state.conversations.find((c) => c.id === state.activeConversationId);
-    if (!conv) {
-      return state;
+  const currentState = get(store);
+  const conv = currentState.conversations.find(c => c.id === currentState.activeConversationId);
+
+  if (conv) {
+    const message = conv.messages.find(m => m.id === id);
+    if (message) {
+      safeUpdateMessage(id, {
+        content: message.content + text,
+        role: 'assistant'
+      });
     }
-    conv.messages = conv.messages.map((message) => {
-      if (message.id === id) {
-        message.content += text;
-        message.role = 'assistant';
-      }
-      return message;
-    });
-    return state;
-  });
+  }
 };
 
+// Use the safer implementation for updating with metadata
 const _updateResponseWithMetadata = (id: number, content: string, metadata: any = {}) => {
-  store.update((state) => {
-    const conv = state.conversations.find((c) => c.id === state.activeConversationId);
-    if (!conv) {
-      return state;
-    }
-    conv.messages = conv.messages.map((message) => {
-      if (message.id === id) {
-        message.content = content;
-        message.role = 'assistant';
-        message.metadata = metadata;
-      }
-      return message;
-    });
-    return state;
+  safeUpdateMessage(id, {
+    content: content,
+    role: 'assistant',
+    metadata: metadata
   });
 };
 
@@ -58,14 +50,20 @@ export const sendMessage = async (userMessage: Message, opts: MessageOpts = {}) 
 
   set({ loading: true, error: '', lastMessageFailed: false });
 
+  // Generate a unique ID for the response message
+  const responseId = Date.now();
+
   const responseMessage = {
     role: 'pending',
     content: '',
-    id: Math.random()
+    id: responseId
   } as Message;
 
   try {
+    // Add user message
     _addMessage(userMessage);
+
+    // Add pending response message
     _addMessage(responseMessage);
 
     // Get research mode state from store if not specified in opts
@@ -99,7 +97,7 @@ export const sendMessage = async (userMessage: Message, opts: MessageOpts = {}) 
     if (response.status >= 400) {
       await readError(response.status, reader);
     } else {
-      await readResponse(reader, responseMessage);
+      await readResponse(reader, responseId);
 
       // Update research mode status after message completes
       updateResearchModeFromActiveConversation();
@@ -115,7 +113,7 @@ export const sendMessage = async (userMessage: Message, opts: MessageOpts = {}) 
 
 const readResponse = async (
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  responseMessage: Message
+  responseId: number
 ) => {
   let inProgress = true;
   let completeMessage = '';
@@ -142,15 +140,15 @@ const readResponse = async (
 
           case 'stream':
             // Append to the message content
-            if (responseMessage.id && chunk.chunk) {
-              _appendResponse(responseMessage.id, chunk.chunk);
+            if (responseId && chunk.chunk) {
+              _appendResponse(responseId, chunk.chunk);
               completeMessage += chunk.chunk;
             }
             break;
 
           case 'end':
             // Final message with full content
-            if (responseMessage.id && chunk.message) {
+            if (responseId && chunk.message) {
               // Store metadata for later use
               completeMessage = chunk.message;
               citations = chunk.citations || [];
@@ -158,7 +156,7 @@ const readResponse = async (
 
               // Update the message with final content and metadata
               _updateResponseWithMetadata(
-                responseMessage.id,
+                responseId,
                 completeMessage,
                 {
                   citations,

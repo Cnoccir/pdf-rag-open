@@ -394,14 +394,14 @@ class ChatManager:
 
     def stream_query(self, query: str, pdf_ids: Optional[List[str]] = None) -> Generator[Dict[str, Any], None, None]:
         """
-        Stream a query response.
+        Stream a query response with enhanced progress reporting.
 
         Args:
             query: User query text
             pdf_ids: Optional list of PDF IDs to query
 
         Yields:
-            Streaming query results
+            Streaming query results with detailed progress information
         """
         # Make sure streaming is enabled
         self.stream_enabled = True
@@ -410,7 +410,9 @@ class ChatManager:
             # First yield a processing message
             yield {
                 "status": "processing",
-                "message": "Processing your query..."
+                "stage": "initialization",
+                "message": "Initializing your query...",
+                "percentage": 5
             }
 
             # Use the PDF ID from init if not provided
@@ -426,13 +428,21 @@ class ChatManager:
 
             # Initialize if needed
             if not self.conversation_state:
+                yield {
+                    "status": "processing",
+                    "stage": "preparation",
+                    "message": "Preparing conversation context...",
+                    "percentage": 10
+                }
                 self.initialize()
 
             # Ensure vector store is ready
             if not self.vector_store_ready:
                 yield {
                     "status": "processing",
-                    "message": "Initializing vector database..."
+                    "stage": "connection",
+                    "message": "Connecting to knowledge database...",
+                    "percentage": 15
                 }
 
                 vector_store = get_vector_store()
@@ -441,12 +451,14 @@ class ChatManager:
                 if self.vector_store_ready:
                     yield {
                         "status": "processing",
-                        "message": "Vector database ready, processing your query..."
+                        "message": "Knowledge database ready, processing your query...",
+                        "stage": "database_ready",
+                        "percentage": 20
                     }
                 else:
                     yield {
                         "status": "error",
-                        "error": "Vector store initialization failed"
+                        "error": "Vector store initialization failed - please try again"
                     }
                     return
 
@@ -463,11 +475,13 @@ class ChatManager:
             if self.conversation_state:
                 self.conversation_state.add_message(MessageType.USER, query)
 
-                # Reset cycle count
+                # Reset cycle count and add timeout protection
                 if not self.conversation_state.metadata:
                     self.conversation_state.metadata = {}
                 self.conversation_state.metadata["cycle_count"] = 0
                 self.conversation_state.metadata["processed_response"] = False
+                self.conversation_state.metadata["query_start_time"] = datetime.now().isoformat()
+                self.conversation_state.metadata["max_processing_time"] = 30  # seconds
 
             # Choose the appropriate graph
             graph = self._get_research_graph() if self.research_mode == ResearchMode.RESEARCH else self._get_query_graph()
@@ -475,36 +489,64 @@ class ChatManager:
             # Create string buffer for accumulating response
             accumulated_response = ""
 
-            # Process steps
+            # Define processing steps with clear progress indicators
             if self.research_mode == ResearchMode.RESEARCH:
                 steps = [
-                    ("query_analyzer", "Analyzing query..."),
-                    ("retriever", "Searching across documents..."),
-                    ("research_synthesizer", "Synthesizing information..."),
-                    ("knowledge_generator", "Generating insights..."),
-                    ("response_generator", "Creating response...")
+                    ("query_analyzer", "Analyzing your question...", 25),
+                    ("retriever", "Searching across multiple documents...", 40),
+                    ("research_synthesizer", "Comparing information between documents...", 55),
+                    ("knowledge_generator", "Connecting concepts and insights...", 70),
+                    ("response_generator", "Creating your comprehensive response...", 85)
                 ]
             else:
                 steps = [
-                    ("query_analyzer", "Analyzing query..."),
-                    ("retriever", "Searching documents..."),
-                    ("knowledge_generator", "Processing information..."),
-                    ("response_generator", "Creating response...")
+                    ("query_analyzer", "Analyzing your question...", 25),
+                    ("retriever", "Searching for relevant information...", 50),
+                    ("knowledge_generator", "Organizing the information...", 70),
+                    ("response_generator", "Creating your response...", 85)
                 ]
 
-            # Run graph with manual stepping for streaming
+            # Run graph with manual stepping for streaming with progress tracking
             current_state = state
-            for node_name, status_message in steps:
+            for i, (node_name, status_message, progress_percentage) in enumerate(steps):
+                # Set processing timeout
+                start_time = datetime.now()
+                max_step_time = 15  # seconds per step maximum
+
                 # Yield status update
                 yield {
                     "status": "processing",
-                    "message": status_message
+                    "stage": node_name,
+                    "message": status_message,
+                    "percentage": progress_percentage
                 }
 
-                # Run the current node
+                # Run the current node with timeout protection
                 try:
                     next_node = graph.get_node(node_name)
-                    current_state = next_node(current_state)
+
+                    # Use a separate thread with timeout to prevent hanging
+                    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+                    with ThreadPoolExecutor() as executor:
+                        future = executor.submit(next_node, current_state)
+                        try:
+                            # Add reasonable timeout for each node
+                            current_state = future.result(timeout=max_step_time)
+                        except TimeoutError:
+                            logger.warning(f"Node {node_name} timed out after {max_step_time}s, continuing with partial results")
+                            yield {
+                                "status": "processing",
+                                "stage": f"{node_name}_timeout",
+                                "message": f"Step taking longer than expected, proceeding with available information...",
+                                "percentage": progress_percentage + 5
+                            }
+                            # If we're at the response generator, we need to proceed carefully
+                            if node_name == "response_generator":
+                                if not current_state.generation_state:
+                                    current_state.generation_state = GenerationState(
+                                        response="I'm sorry, but I couldn't complete the full analysis in time. Here's what I've found so far...",
+                                        citations=[]
+                                    )
 
                     # Check if we have a generated response
                     if (node_name == "response_generator" and
@@ -522,7 +564,8 @@ class ChatManager:
                                 "type": "stream",
                                 "chunk": chunk,
                                 "index": i // self.stream_chunk_size,
-                                "is_complete": False
+                                "is_complete": False,
+                                "percentage": 85 + (i / len(response)) * 10  # Scale from 85% to 95%
                             }
 
                             # Add a small delay for smoother streaming
@@ -556,6 +599,14 @@ class ChatManager:
 
                     # Save conversation
                     self.memory_manager.save_conversation(self.conversation_state)
+
+                    # Final progress update
+                    yield {
+                        "status": "processing",
+                        "stage": "finalizing",
+                        "message": "Finalizing response...",
+                        "percentage": 98
+                    }
             except Exception as save_error:
                 logger.error(f"Error saving conversation: {str(save_error)}")
 
@@ -564,7 +615,8 @@ class ChatManager:
                 "status": "complete",
                 "response": current_state.generation_state.response if current_state.generation_state else accumulated_response,
                 "conversation_id": self.conversation_id,
-                "citations": current_state.generation_state.citations if current_state.generation_state and hasattr(current_state.generation_state, "citations") else []
+                "citations": current_state.generation_state.citations if current_state.generation_state and hasattr(current_state.generation_state, "citations") else [],
+                "percentage": 100
             }
 
         except Exception as e:
@@ -573,7 +625,7 @@ class ChatManager:
                 "status": "error",
                 "error": str(e)
             }
-
+            
     def get_conversation_history(self) -> List[Dict[str, Any]]:
         """
         Get formatted conversation history.

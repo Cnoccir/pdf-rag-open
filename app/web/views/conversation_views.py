@@ -385,7 +385,7 @@ def delete_conversation(conversation_id):
         return jsonify({"error": str(e)}), 500
 
 def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_id=None, active_docs=None):
-    """Stream chat response for a message."""
+    """Stream chat response for a message with enhanced progress tracking."""
     def generate():
         # Initialize chat manager
         chat_args = ChatArgs(
@@ -405,12 +405,17 @@ def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_i
             yield json.dumps({
                 "type": "status",
                 "status": "processing",
-                "message": "Processing your query..."
+                "stage": "initialization",
+                "message": "Processing your query...",
+                "percentage": 5
             }) + "\n"
 
             # Stream response
             pdf_ids_to_use = active_docs if research_mode_str == "research" and active_docs else None
             response_chunks = []
+
+            # Track progress for frontend
+            last_percentage = 5
 
             # Use the streamable ChatManager.stream_query method
             for chunk in chat_manager.stream_query(user_message, pdf_ids_to_use):
@@ -422,11 +427,17 @@ def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_i
                     return
 
                 if "status" in chunk:
+                    # Update progress information
+                    current_percentage = chunk.get("percentage", last_percentage)
+                    last_percentage = current_percentage
+
                     if chunk["status"] == "processing":
                         yield json.dumps({
                             "type": "status",
                             "status": "processing",
-                            "message": chunk["message"]
+                            "stage": chunk.get("stage", "processing"),
+                            "message": chunk["message"],
+                            "percentage": current_percentage
                         }) + "\n"
                     elif chunk["status"] == "complete":
                         # The conversation is already saved by the ChatManager
@@ -434,7 +445,8 @@ def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_i
                             "type": "end",
                             "message": chunk["response"],
                             "conversation_id": conversation_id,
-                            "citations": chunk.get("citations", [])
+                            "citations": chunk.get("citations", []),
+                            "percentage": 100
                         }) + "\n"
                         return
 
@@ -442,11 +454,12 @@ def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_i
                     # Add to accumulated response for database
                     response_chunks.append(chunk["chunk"])
 
-                    # Yield chunk to client
+                    # Yield chunk to client with percentage if available
                     yield json.dumps({
                         "type": "stream",
                         "chunk": chunk["chunk"],
                         "index": chunk.get("index", 0),
+                        "percentage": chunk.get("percentage", last_percentage),
                         "is_complete": chunk.get("is_complete", False)
                     }) + "\n"
 
@@ -480,7 +493,8 @@ def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_i
                     "type": "end",
                     "message": full_response,
                     "conversation_id": conversation_id,
-                    "citations": []
+                    "citations": [],
+                    "percentage": 100
                 }) + "\n"
 
             except Exception as db_error:
