@@ -2,7 +2,7 @@
 SQL-based memory manager for conversation persistence.
 Simplified implementation with sync interfaces.
 """
-
+from flask import current_app
 import logging
 import json
 from typing import Dict, List, Optional, Any, Union
@@ -106,7 +106,7 @@ class MemoryManager:
 
     def save_conversation(self, conversation: ConversationState) -> bool:
         """
-        Save conversation state to SQL database
+        Save conversation state to SQL database with app context handling
 
         Args:
             conversation: Conversation state to save
@@ -119,6 +119,29 @@ class MemoryManager:
             return False
 
         try:
+            # Check if we're in app context
+            try:
+                # This will raise RuntimeError if outside app context
+                current_app.name
+                return self._save_conversation_impl(conversation)
+            except (RuntimeError, AttributeError):
+                # Not in app context, create one
+                from app.web import create_app
+                app = create_app()
+                with app.app_context():
+                    logger.debug(f"Created new app context to save conversation {conversation.conversation_id}")
+                    return self._save_conversation_impl(conversation)
+        except Exception as e:
+            logger.error(f"Error saving conversation {conversation.conversation_id}: {str(e)}")
+            return False
+
+    def _save_conversation_impl(self, conversation: ConversationState) -> bool:
+        """Actual implementation of save_conversation that assumes app context"""
+        # Move the original save_conversation code here
+        try:
+            from app.web.db.models import Conversation as DBConversation, Message as DBMessage
+            from app.web.db import db
+
             # Find or create conversation in database
             db_conversation = db.session.execute(
                 db.select(DBConversation).filter_by(id=conversation.conversation_id)
@@ -206,7 +229,6 @@ class MemoryManager:
 
         except Exception as e:
             logger.error(f"Error saving conversation {conversation.conversation_id}: {str(e)}")
-            logger.error(traceback.format_exc())
 
             # Roll back transaction
             db.session.rollback()

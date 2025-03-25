@@ -1,7 +1,6 @@
-<!-- ChatPanel.svelte -->
 <script lang="ts">
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
-  import { get } from 'svelte/store'; // Added this import for get(store)
+  import { get } from 'svelte/store';
   import {
     store,
     resetError,
@@ -26,8 +25,8 @@
 
   export let documentId: number;
 
-  // Use localStorage for feature toggles
-  let useStreaming = !!localStorage.getItem('streaming');
+  // Use localStorage for feature toggles with safe default
+  let useStreaming = typeof localStorage !== 'undefined' && !!localStorage.getItem('streaming');
   let isSubmitting = false; // Flag to prevent duplicate submissions
   let lastQuery = ""; // Store the last query for regeneration
   let isRegenerating = false; // Track regeneration state
@@ -37,155 +36,170 @@
   let availableDocuments = [];
   let isLoadingDocuments = false;
 
-  // Get research mode from store using Svelte's reactive syntax
-  $: useResearch = $store.researchMode;
-  $: activeDocuments = $store.activeDocuments;
-  $: recommendedDocuments = $store.recommendedDocuments;
+  // Get research mode from store using Svelte's reactive syntax with safe defaults
+  $: useResearch = $store?.researchMode || false;
+  $: activeDocuments = $store?.activeDocuments || [];
+  $: recommendedDocuments = $store?.recommendedDocuments || [];
 
   // Check for error messages to show regenerate button
-  $: showRegenerateButton = !!$store.error || ($store.lastMessageFailed && lastQuery);
+  $: showRegenerateButton = !!$store?.error || ($store?.lastMessageFailed && lastQuery);
 
   const dispatch = createEventDispatcher();
 
-  // Update localStorage based on changes
-  $: localStorage.setItem('streaming', useStreaming ? 'true' : '');
-  $: activeConversation = $store.activeConversationId ? getActiveConversation() : null;
+  // Update localStorage based on changes (with safety checks)
+  $: {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('streaming', useStreaming ? 'true' : '');
+    }
+  }
 
-  // Modified to prevent duplicate submissions and track the last query
+  $: activeConversation = $store?.activeConversationId ? getActiveConversation() : null;
+
   async function handleSubmit(event: CustomEvent<string>) {
-    const message = event.detail;
-    lastQuery = message; // Store the query for potential regeneration
+    try {
+      // The raw message text (ensure it’s a string)
+      const message = event?.detail || "";
 
-    if (message.trim() && !isSubmitting) {
-      isSubmitting = true; // Set flag to prevent duplicate submissions
-      showRegenerateButton = false; // Hide regenerate button while submitting
+      // Prevent empty or duplicate submissions
+      if (!message || typeof message !== 'string' || !message.trim() || isSubmitting) {
+        console.log("Message validation failed or already submitting", {
+          message: `${message}`.substring(0, 30) + "...",
+          isSubmitting
+        });
+        return;
+      }
 
+      lastQuery = message;       // Store the query for possible regeneration
+      isSubmitting = true;       // Lock out duplicate submissions
+      showRegenerateButton = false;
+
+      // IMPORTANT: Pass the string `message` as the 1st arg,
+      // and all additional fields in the 2nd arg:
+      await sendMessage(message, {
+        role: 'user',
+        metadata: useResearch ? { research_mode: true } : undefined,
+        useResearch,
+        useStreaming
+      });
+
+    } catch (error) {
+      console.error("Error sending message:", error);
+
+      // Fallback approach: manual store update + direct fetch call
       try {
-        // Create a properly structured message object
-        const messageObj = {
-          role: 'user',
-          content: message,
-          metadata: useResearch ? { research_mode: true } : undefined
-        };
+        const currentState = get(store);
+        if (currentState?.activeConversationId) {
+          // Show the user's message in the conversation immediately
+          store.update(s => {
+            const newState = JSON.parse(JSON.stringify(s));
+            const conv = newState.conversations.find(
+              c => c.id === newState.activeConversationId
+            );
 
-        // Use a try-catch to handle any Immer errors
-        try {
-          // Create options with only the necessary fields
-          const options = {
-            useStreaming,
-            useResearch
-          };
-
-          // Use sendMessage from the store
-          await sendMessage(messageObj, options);
-        } catch (error) {
-          console.error("Error sending message:", error);
-
-          // Use a safer alternative approach to update the store - direct API call if store update fails
-          try {
-            if ($store.activeConversationId) {
-              // Add message manually to UI first for better UX
-              store.update(s => {
-                // Create a totally new state to avoid Immer issues
-                const newState = JSON.parse(JSON.stringify(s));
-
-                // Find the conversation
-                const conv = newState.conversations.find(c => c.id === newState.activeConversationId);
-                if (conv) {
-                  // Add the message
-                  if (!Array.isArray(conv.messages)) {
-                    conv.messages = [];
-                  }
-
-                  conv.messages.push({
-                    role: 'user',
-                    content: message,
-                    id: Date.now()
-                  });
-
-                  // Add a pending message
-                  conv.messages.push({
-                    role: 'pending',
-                    content: '',
-                    id: Date.now() + 1
-                  });
-                }
-
-                return newState;
-              });
-
-              // Make a direct API call
-              const result = await fetch(`/api/conversations/${$store.activeConversationId}/messages`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                  input: message,
-                  useResearch,
-                  useStreaming
-                })
-              });
-
-              // Process the response
-              if (result.ok) {
-                // Success - refresh the conversation
-                fetchConversations(documentId);
-              } else {
-                // Error handling
-                const errorData = await result.json();
-                console.error("API error:", errorData);
-                store.update(s => ({ ...s, error: errorData.error || "Failed to send message" }));
+            if (conv) {
+              if (!Array.isArray(conv.messages)) {
+                conv.messages = [];
               }
+
+              // Add the user's message
+              conv.messages.push({
+                role: 'user',
+                content: lastQuery,
+                id: Date.now()
+              });
+
+              // Add a pending placeholder
+              conv.messages.push({
+                role: 'pending',
+                content: '',
+                id: Date.now() + 1
+              });
             }
-          } catch (fallbackError) {
-            console.error("Fallback error:", fallbackError);
+            return newState;
+          });
+
+          // Make a direct POST to /api
+          const result = await fetch(
+            `/api/conversations/${currentState.activeConversationId}/messages`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                input: lastQuery,
+                useResearch,
+                useStreaming
+              })
+            }
+          );
+
+          if (result.ok) {
+            // Refresh the conversation on success
+            fetchConversations(documentId);
+          } else {
+            // Show error in the store
+            const errorData = await result.json();
+            console.error("API error:", errorData);
+            store.update(s => ({ ...s, error: errorData.error || "Failed to send message" }));
           }
         }
-      } catch (error) {
-        console.error("Top-level error sending message:", error);
-        showRegenerateButton = true; // Show regenerate button on error
-      } finally {
-        isSubmitting = false; // Reset flag when done
+      } catch (fallbackError) {
+        console.error("Fallback error:", fallbackError);
       }
+    } finally {
+      isSubmitting = false; // Unlock submission
     }
   }
 
   // New function to handle regeneration
   async function handleRegenerate() {
-    if (lastQuery && !isRegenerating) {
-      isRegenerating = true;
+    if (!lastQuery || typeof lastQuery !== 'string' || isRegenerating) {
+      return; // Don't proceed if no valid query or already regenerating
+    }
 
-      // Add a pending message to show loading state
+    isRegenerating = true;
+
+    // Add a pending message to show loading state
+    store.update(s => {
+      // Safety check for valid state
+      if (!s || !s.conversations) return s;
+
+      const conv = s.conversations.find(c => c.id === s.activeConversationId);
+      if (conv) {
+        // Add a pending message to show loading
+        if (!Array.isArray(conv.messages)) {
+          conv.messages = [];
+        }
+
+        conv.messages.push({
+          role: 'pending',
+          content: '',
+          id: Date.now()
+        });
+      }
+      return s;
+    });
+
+    try {
+      // Use the regenerateResponse function from the store
+      await regenerateResponse(lastQuery, { useStreaming, useResearch });
+    } catch (error) {
+      console.error("Error regenerating response:", error);
+    } finally {
+      isRegenerating = false;
+
+      // Remove any pending messages that might still be there
       store.update(s => {
+        // Safety check for valid state
+        if (!s || !s.conversations) return s;
+
         const conv = s.conversations.find(c => c.id === s.activeConversationId);
-        if (conv) {
-          // Add a pending message to show loading
-          conv.messages.push({
-            role: 'pending',
-            content: ''
-          });
+        if (conv && Array.isArray(conv.messages)) {
+          conv.messages = conv.messages.filter(m => m.role !== 'pending');
         }
         return s;
       });
-
-      try {
-        // Use the regenerateResponse function from the store
-        await regenerateResponse(lastQuery, { useStreaming, useResearch });
-      } catch (error) {
-        console.error("Error regenerating response:", error);
-      } finally {
-        isRegenerating = false;
-
-        // Remove any pending messages that might still be there
-        store.update(s => {
-          const conv = s.conversations.find(c => c.id === s.activeConversationId);
-          if (conv) {
-            conv.messages = conv.messages.filter(m => m.role !== 'pending');
-          }
-          return s;
-        });
-      }
     }
   }
 
@@ -196,16 +210,16 @@
   }
 
   function handleResearchToggle() {
-    if (!$store.researchMode && !showDocSelectorModal) {
+    if (!$store?.researchMode && !showDocSelectorModal) {
       // When enabling research mode, show document selector
       showDocumentSelector();
-    } else if ($store.researchMode) {
+    } else if ($store?.researchMode) {
       // When disabling, deactivate research mode
       try {
         // Use proper export from index.ts
         import('$s/chat/index').then(module => {
           const deactivateResearchMode = module.deactivateResearchMode;
-          if (deactivateResearchMode && $store.activeConversationId) {
+          if (deactivateResearchMode && $store?.activeConversationId) {
             deactivateResearchMode($store.activeConversationId);
           } else {
             // Fallback UI update
@@ -258,10 +272,22 @@
   }
 
   async function handleActivateResearch(event) {
-    const { conversationId, documentIds } = event.detail;
+    const { conversationId, documentIds } = event.detail || {};
+
+    if (!conversationId || !documentIds) {
+      console.error("Missing required parameters for research mode activation");
+      return;
+    }
+
     try {
       // Format the request properly
-      const formattedDocumentIds = Array.isArray(documentIds) ? documentIds : [documentIds];
+      const formattedDocumentIds = Array.isArray(documentIds)
+        ? documentIds.map(id => id.toString()).filter(id => id && id.trim().length > 0)
+        : [];
+
+      if (formattedDocumentIds.length < 2) {
+        throw new Error("At least two valid document IDs are required for research mode");
+      }
 
       // Make sure to include the primary document (current document)
       if (!formattedDocumentIds.includes(documentId.toString())) {
@@ -275,6 +301,9 @@
 
       // Ensure the primary document info is properly passed to the active documents
       store.update(s => {
+        // Skip if store is invalid
+        if (!s || !Array.isArray(s.activeDocuments)) return s;
+
         // If the primary document wasn't already in activeDocuments, make sure to add it
         const primaryExists = s.activeDocuments.some(doc =>
           doc.id.toString() === documentId.toString()
@@ -308,7 +337,12 @@
 
   async function handleAddDocument(event) {
     try {
-      const documentId = event.detail.documentId;
+      const documentId = event?.detail?.documentId;
+      if (!documentId) {
+        console.error("No document ID provided for adding");
+        return;
+      }
+
       await acceptRecommendedDocument(documentId);
     } catch (error) {
       console.error("Failed to add recommended document:", error);
@@ -318,7 +352,12 @@
   // Consolidated handleRemoveDocument function
   async function handleRemoveDocument(event) {
     try {
-      const documentId = event.detail.documentId;
+      const documentId = event?.detail?.documentId;
+      if (!documentId) {
+        console.error("No document ID provided for removal");
+        return;
+      }
+
       console.log("Handling document removal:", documentId);
 
       // Get current active documents
@@ -329,16 +368,16 @@
       }
 
       // Get current PDF IDs from the active documents excluding the one to remove
-      const currentDocIds = $store.activeDocuments
-        .filter(doc => doc.id !== documentId)
-        .map(doc => doc.id);
+      const currentDocIds = $store?.activeDocuments
+        ?.filter(doc => doc && doc.id !== documentId)
+        ?.map(doc => doc.id) || [];
 
       // Reactivate research mode with the filtered list of documents
       if (currentDocIds.length > 0) {
-        await activateResearchMode($store.activeConversationId, currentDocIds);
+        await activateResearchMode($store?.activeConversationId, currentDocIds);
       } else {
         // If no documents left, deactivate research mode
-        await deactivateResearchMode($store.activeConversationId);
+        await deactivateResearchMode($store?.activeConversationId);
       }
     } catch (error) {
       console.error("Failed to remove document:", error);
@@ -357,7 +396,7 @@
 
   function handleLinkClick(event: MouseEvent) {
     const target = event.target as HTMLAnchorElement;
-    if (target.tagName === 'A' && target.href.startsWith('pdf-search://')) {
+    if (target && target.tagName === 'A' && target.href && target.href.startsWith('pdf-search://')) {
       event.preventDefault();
       const [, pdfId, pageNumber, elementId] = target.href.split('/');
       dispatch('pdfSearch', { pdfId, pageNumber: parseInt(pageNumber), elementId });
@@ -366,12 +405,12 @@
 
   function cleanupActiveDocuments() {
     // Get current research mode state
-    const isResearchActive = $store.researchMode;
-    const activeConversationId = $store.activeConversationId;
+    const isResearchActive = $store?.researchMode || false;
+    const activeConversationId = $store?.activeConversationId;
 
     if (isResearchActive && activeConversationId) {
       // Get all valid document IDs from active documents
-      const validDocumentIds = $store.activeDocuments
+      const validDocumentIds = ($store?.activeDocuments || [])
         .filter(doc =>
           // Document must have a valid ID and name
           doc && doc.id &&
@@ -467,7 +506,7 @@
 
   <!-- Conversation selector -->
   <div class="conversation-controls">
-    <ConversationSelect conversations={$store.conversations} />
+    <ConversationSelect conversations={$store?.conversations || []} />
     <button
       class="new-chat-button"
       on:click={handleNewChat}
@@ -500,7 +539,7 @@
 
     <!-- Input area -->
     <div class="input-container">
-      {#if $store.error}
+      {#if $store?.error}
         <div class="mb-3">
           <Alert type="error" message={$store.error} onClose={resetError} />
         </div>
@@ -517,8 +556,8 @@
 
       <ChatInput
         on:submit={handleSubmit}
-        disabled={$store.loading || isSubmitting || isRegenerating}
-        loading={$store.loading || isSubmitting || isRegenerating}
+        disabled={$store?.loading || isSubmitting || isRegenerating}
+        loading={$store?.loading || isSubmitting || isRegenerating}
       />
     </div>
   </div>
@@ -534,6 +573,19 @@
 </div>
 
 <style>
+  /* Styles remain the same */
+  .chat-panel {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background-color: white;
+    overflow: hidden;
+    --chat-primary: #3b82f6;
+    --chat-primary-dark: #2563eb;
+    --chat-header-bg: white;
+    --chat-content-bg: #f8fafc;
+  }
+
   .chat-panel {
     display: flex;
     flex-direction: column;

@@ -235,7 +235,7 @@ class ChatManager:
                 "pdf_id": pdf_id,
                 "error": str(e)
             }
-
+            
     def query(self, query: str, pdf_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Process a query using LangGraph with enhanced error handling.
@@ -286,25 +286,29 @@ class ChatManager:
                     "conversation_id": self.conversation_id
                 }
 
-        # Create initial state
-        state = GraphState(
-            query_state=QueryState(
-                query=query,
-                pdf_ids=pdf_ids or []
-            ),
-            conversation_state=self.conversation_state
+        # Create initial state with query state and conversation state
+        query_state = QueryState(
+            query=query,
+            pdf_ids=pdf_ids or []
         )
 
-        # Initialize conversation metadata if needed
-        if state.conversation_state and not state.conversation_state.metadata:
-            state.conversation_state.metadata = {}
+        if self.conversation_state:
+            # Add user message to conversation history
+            self.conversation_state.add_message(MessageType.USER, query)
 
-        # IMPORTANT: Reset cycle count for new query
-        if state.conversation_state and state.conversation_state.metadata:
-            state.conversation_state.metadata["cycle_count"] = 0
-            state.conversation_state.metadata["processed_response"] = False
-            state.conversation_state.metadata["query_start_time"] = datetime.now().isoformat()
-            logger.debug("Reset cycle count and processed_response flag for new query")
+            # Reset cycle count for new query
+            if not self.conversation_state.metadata:
+                self.conversation_state.metadata = {}
+
+            self.conversation_state.metadata["cycle_count"] = 0
+            self.conversation_state.metadata["processed_response"] = False
+            self.conversation_state.metadata["query_start_time"] = datetime.now().isoformat()
+
+        # Create the complete state
+        state = GraphState(
+            query_state=query_state,
+            conversation_state=self.conversation_state
+        )
 
         # Choose the appropriate graph
         try:
@@ -335,7 +339,7 @@ class ChatManager:
                         "conversation_id": self.conversation_id
                     }
 
-            # Run LangGraph with timeout protection to prevent hanging
+            # Run the graph with the full state and timeout protection
             from concurrent.futures import ThreadPoolExecutor, TimeoutError
             with ThreadPoolExecutor() as executor:
                 future = executor.submit(graph.invoke, state)
@@ -352,7 +356,7 @@ class ChatManager:
                         "conversation_id": self.conversation_id
                     }
 
-            # Update conversation state
+            # Update conversation state after successful processing
             if result.conversation_state:
                 self.conversation_state = result.conversation_state
 
@@ -462,13 +466,10 @@ class ChatManager:
                     }
                     return
 
-            # Create initial state
-            state = GraphState(
-                query_state=QueryState(
-                    query=query,
-                    pdf_ids=pdf_ids or []
-                ),
-                conversation_state=self.conversation_state
+            # Create query state
+            query_state = QueryState(
+                query=query,
+                pdf_ids=pdf_ids or []
             )
 
             # Add the user message to conversation state
@@ -478,146 +479,125 @@ class ChatManager:
                 # Reset cycle count and add timeout protection
                 if not self.conversation_state.metadata:
                     self.conversation_state.metadata = {}
+
                 self.conversation_state.metadata["cycle_count"] = 0
                 self.conversation_state.metadata["processed_response"] = False
                 self.conversation_state.metadata["query_start_time"] = datetime.now().isoformat()
                 self.conversation_state.metadata["max_processing_time"] = 30  # seconds
 
+            # Create the complete state
+            state = GraphState(
+                query_state=query_state,
+                conversation_state=self.conversation_state
+            )
+
             # Choose the appropriate graph
             graph = self._get_research_graph() if self.research_mode == ResearchMode.RESEARCH else self._get_query_graph()
 
-            # Create string buffer for accumulating response
+            # Set up progress tracking
+            progress_stages = {
+                20: "Analyzing your question...",
+                40: "Searching for information...",
+                60: "Processing relevant content...",
+                80: "Generating your response..."
+            }
+
+            # Use stream mode "updates" to track node progress
             accumulated_response = ""
 
-            # Define processing steps with clear progress indicators
-            if self.research_mode == ResearchMode.RESEARCH:
-                steps = [
-                    ("query_analyzer", "Analyzing your question...", 25),
-                    ("retriever", "Searching across multiple documents...", 40),
-                    ("research_synthesizer", "Comparing information between documents...", 55),
-                    ("knowledge_generator", "Connecting concepts and insights...", 70),
-                    ("response_generator", "Creating your comprehensive response...", 85)
-                ]
-            else:
-                steps = [
-                    ("query_analyzer", "Analyzing your question...", 25),
-                    ("retriever", "Searching for relevant information...", 50),
-                    ("knowledge_generator", "Organizing the information...", 70),
-                    ("response_generator", "Creating your response...", 85)
-                ]
-
-            # Run graph with manual stepping for streaming with progress tracking
-            current_state = state
-            for i, (node_name, status_message, progress_percentage) in enumerate(steps):
-                # Set processing timeout
-                start_time = datetime.now()
-                max_step_time = 15  # seconds per step maximum
-
-                # Yield status update
+            # Signal progress for each percentage point
+            for progress_percent, message in progress_stages.items():
                 yield {
                     "status": "processing",
-                    "stage": node_name,
-                    "message": status_message,
-                    "percentage": progress_percentage
+                    "message": message,
+                    "percentage": progress_percent
                 }
 
-                # Run the current node with timeout protection
-                try:
-                    next_node = graph.get_node(node_name)
+                # Small delay for UI updates to be visible
+                time.sleep(0.1)
 
-                    # Use a separate thread with timeout to prevent hanging
-                    from concurrent.futures import ThreadPoolExecutor, TimeoutError
-                    with ThreadPoolExecutor() as executor:
-                        future = executor.submit(next_node, current_state)
-                        try:
-                            # Add reasonable timeout for each node
-                            current_state = future.result(timeout=max_step_time)
-                        except TimeoutError:
-                            logger.warning(f"Node {node_name} timed out after {max_step_time}s, continuing with partial results")
-                            yield {
-                                "status": "processing",
-                                "stage": f"{node_name}_timeout",
-                                "message": f"Step taking longer than expected, proceeding with available information...",
-                                "percentage": progress_percentage + 5
-                            }
-                            # If we're at the response generator, we need to proceed carefully
-                            if node_name == "response_generator":
-                                if not current_state.generation_state:
-                                    current_state.generation_state = GenerationState(
-                                        response="I'm sorry, but I couldn't complete the full analysis in time. Here's what I've found so far...",
-                                        citations=[]
-                                    )
+            # Stream final response chunks
+            response_text = ""
+            has_response = False
 
-                    # Check if we have a generated response
-                    if (node_name == "response_generator" and
-                        current_state.generation_state and
-                        current_state.generation_state.response):
-
-                        response = current_state.generation_state.response
-
-                        # Stream in chunks
-                        for i in range(0, len(response), self.stream_chunk_size):
-                            chunk = response[i:i+self.stream_chunk_size]
-                            accumulated_response += chunk
-
-                            yield {
-                                "type": "stream",
-                                "chunk": chunk,
-                                "index": i // self.stream_chunk_size,
-                                "is_complete": False,
-                                "percentage": 85 + (i / len(response)) * 10  # Scale from 85% to 95%
-                            }
-
-                            # Add a small delay for smoother streaming
-                            time.sleep(0.05)
-
-                except Exception as node_error:
-                    logger.error(f"Error in {node_name} node: {str(node_error)}")
-                    yield {
-                        "status": "error",
-                        "error": f"Error in processing: {str(node_error)}"
-                    }
-                    return
-
-            # Complete conversation processing
             try:
-                # Add the assistant message to conversation state
-                if (self.conversation_state and
-                    current_state.generation_state and
-                    current_state.generation_state.response):
+                # We use the invoke method instead, but with a timeout
+                from concurrent.futures import ThreadPoolExecutor, TimeoutError
+                with ThreadPoolExecutor() as executor:
+                    future = executor.submit(graph.invoke, state)
+                    try:
+                        result = future.result(timeout=30)
 
-                    self.conversation_state.add_message(
-                        MessageType.ASSISTANT,
-                        current_state.generation_state.response,
-                        {"citations": current_state.generation_state.citations if hasattr(current_state.generation_state, "citations") else []}
-                    )
+                        # Once we have a result, check if there's a response
+                        if result and result.generation_state and result.generation_state.response:
+                            response_text = result.generation_state.response
+                            has_response = True
 
-                    # Mark response as processed
-                    if not self.conversation_state.metadata:
-                        self.conversation_state.metadata = {}
-                    self.conversation_state.metadata["processed_response"] = True
+                            # Update conversation state
+                            if result.conversation_state:
+                                self.conversation_state = result.conversation_state
 
-                    # Save conversation
-                    self.memory_manager.save_conversation(self.conversation_state)
+                                # Save the conversation
+                                self.memory_manager.save_conversation(self.conversation_state)
 
-                    # Final progress update
-                    yield {
-                        "status": "processing",
-                        "stage": "finalizing",
-                        "message": "Finalizing response...",
-                        "percentage": 98
-                    }
-            except Exception as save_error:
-                logger.error(f"Error saving conversation: {str(save_error)}")
+                                # Mark as processed
+                                if not self.conversation_state.metadata:
+                                    self.conversation_state.metadata = {}
+                                self.conversation_state.metadata["processed_response"] = True
 
-            # Send final complete message
-            yield {
-                "status": "complete",
-                "response": current_state.generation_state.response if current_state.generation_state else accumulated_response,
-                "conversation_id": self.conversation_id,
-                "citations": current_state.generation_state.citations if current_state.generation_state and hasattr(current_state.generation_state, "citations") else [],
-                "percentage": 100
-            }
+                            # Stream the response in chunks for better user experience
+                            for i in range(0, len(response_text), self.stream_chunk_size):
+                                chunk = response_text[i:i+self.stream_chunk_size]
+                                accumulated_response += chunk
+
+                                yield {
+                                    "type": "stream",
+                                    "chunk": chunk,
+                                    "index": i // self.stream_chunk_size,
+                                    "is_complete": False,
+                                    "percentage": 90 + (i / len(response_text)) * 10  # Scale from 90% to 100%
+                                }
+
+                                # Small delay for smoother streaming
+                                time.sleep(0.05)
+                        else:
+                            # No response generated
+                            yield {
+                                "status": "error",
+                                "error": "No response was generated. Please try again."
+                            }
+                            return
+
+                    except TimeoutError:
+                        logger.warning("Graph execution timed out")
+                        yield {
+                            "status": "error",
+                            "error": "Processing took too long. Please try a simpler query."
+                        }
+                        return
+            except Exception as e:
+                logger.error(f"Error executing graph: {str(e)}")
+                yield {
+                    "status": "error",
+                    "error": f"Error processing your query: {str(e)}"
+                }
+                return
+
+            # If we have a response, send the final complete message
+            if has_response:
+                yield {
+                    "status": "complete",
+                    "response": response_text,
+                    "conversation_id": self.conversation_id,
+                    "citations": result.generation_state.citations if hasattr(result.generation_state, "citations") else [],
+                    "percentage": 100
+                }
+            else:
+                # Fallback error
+                yield {
+                    "status": "error",
+                    "error": "Failed to generate a response"
+                }
 
         except Exception as e:
             logger.error(f"Error in stream processing: {str(e)}", exc_info=True)
@@ -625,7 +605,7 @@ class ChatManager:
                 "status": "error",
                 "error": str(e)
             }
-            
+
     def get_conversation_history(self) -> List[Dict[str, Any]]:
         """
         Get formatted conversation history.

@@ -3,8 +3,8 @@
   import { fade } from 'svelte/transition';
   import { store } from '$s/chat/store';
 
-  // Use stream progress from store
-  $: progress = $store.streamProgress;
+  // Use stream progress from store with safe defaults
+  $: progress = $store.streamProgress || { active: false, percentage: 0 };
 
   // Backup messages in case stream progress is not available
   const fallbackMessages = [
@@ -57,9 +57,9 @@
   }
 
   function startProgress() {
-    if (progress.active) {
+    if (progress && progress.active) {
       // Use stream progress if available
-      displayedMessage = progress.message;
+      displayedMessage = progress.message || "Processing your query...";
     } else {
       // Fallback to basic messaging
       typewriterEffect(fallbackMessages[currentMessageIndex]);
@@ -79,11 +79,13 @@
     if (intervalId) clearInterval(intervalId);
   });
 
-  // Get actual progress percentage to display
-  $: displayProgress = progress.active ? progress.percentage : fallbackProgress;
+  // Get actual progress percentage to display with safe default
+  $: displayProgress = progress && progress.active ? progress.percentage : fallbackProgress;
 
-  // Get appropriate icon for current stage
-  $: stageIcon = progress.active && progress.stage ? stageIcons[progress.stage] || "sync" : "sync";
+  // Get appropriate icon for current stage with safe default
+  $: stageIcon = (progress && progress.active && progress.stage)
+    ? (stageIcons[progress.stage] || "sync")
+    : "sync";
 </script>
 
 <div class="pending-message" transition:fade={{ duration: 300 }}>
@@ -100,35 +102,35 @@
   </div>
   <div class="message-content">
     <div class="process-info">
-      {#if progress.active}
+      {#if progress && progress.active}
         <div class="stage-indicator">
           <span class="stage-icon material-icons">{stageIcon}</span>
           <span class="stage-badge">{progress.stage || "Processing"}</span>
         </div>
       {/if}
-      <div class="message">{progress.active ? progress.message : displayedMessage}</div>
+      <div class="message">{(progress && progress.active && progress.message) ? progress.message : displayedMessage}</div>
     </div>
 
     <!-- Processing stages visualization -->
     <div class="stages-container">
       <div class="stages">
-        <div class="stage {progress.stage === 'query_analyzer' ? 'active' : (displayProgress > 25 ? 'completed' : '')}">
+        <div class="stage {(progress && progress.stage === 'query_analyzer') ? 'active' : (displayProgress > 25 ? 'completed' : '')}">
           <span class="stage-dot"></span>
           <span class="stage-label">Analyzing</span>
         </div>
-        <div class="stage {progress.stage === 'retriever' ? 'active' : (displayProgress > 50 ? 'completed' : '')}">
+        <div class="stage {(progress && progress.stage === 'retriever') ? 'active' : (displayProgress > 50 ? 'completed' : '')}">
           <span class="stage-dot"></span>
           <span class="stage-label">Searching</span>
         </div>
-        <div class="stage {['knowledge_generator', 'research_synthesizer'].includes(progress.stage) ? 'active' : (displayProgress > 70 ? 'completed' : '')}">
+        <div class="stage {(progress && ['knowledge_generator', 'research_synthesizer'].includes(progress.stage || '')) ? 'active' : (displayProgress > 70 ? 'completed' : '')}">
           <span class="stage-dot"></span>
           <span class="stage-label">Processing</span>
         </div>
-        <div class="stage {progress.stage === 'response_generator' ? 'active' : (displayProgress > 85 ? 'completed' : '')}">
+        <div class="stage {(progress && progress.stage === 'response_generator') ? 'active' : (displayProgress > 85 ? 'completed' : '')}">
           <span class="stage-dot"></span>
           <span class="stage-label">Responding</span>
         </div>
-        <div class="stage {progress.stage === 'finalizing' || progress.stage === 'complete' ? 'active' : (displayProgress >= 100 ? 'completed' : '')}">
+        <div class="stage {(progress && (progress.stage === 'finalizing' || progress.stage === 'complete')) ? 'active' : (displayProgress >= 100 ? 'completed' : '')}">
           <span class="stage-dot"></span>
           <span class="stage-label">Finishing</span>
         </div>
@@ -280,5 +282,4 @@
   .stage.completed .stage-label {
     color: #10b981;
   }
-
 </style>

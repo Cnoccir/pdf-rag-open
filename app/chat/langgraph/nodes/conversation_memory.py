@@ -1,9 +1,3 @@
-"""
-Conversation memory node for LangGraph-based PDF RAG system.
-Handles conversation history management and technical concept extraction.
-Enhanced to handle direct invocations from LangGraph Studio.
-"""
-
 import logging
 import re
 from typing import Dict, List, Any, Optional
@@ -60,9 +54,8 @@ def process_conversation_memory(state: GraphState) -> dict:
     # Log the cycle count every time for better observability
     logger.info(f"Conversation memory processing cycle: {cycle_count + 1}")
 
-    # CRITICAL FIX: Force end if we've cycled too many times
-    # Increased from 3 to 10 for more headroom
-    if cycle_count > 10:
+    # CRITICAL FIX: Force end if we've cycled too many times (reduced from 10 to 5)
+    if cycle_count > 5:
         state.conversation_state.metadata["processed_response"] = True
         logger.warning(f"Forcing end of processing after {cycle_count} cycles")
         return {"conversation_state": state.conversation_state}
@@ -111,6 +104,15 @@ def process_conversation_memory(state: GraphState) -> dict:
 
         logger.info(f"Added AI response to conversation history with {len(response_terms)} technical terms")
         logger.debug(f"Set processed_response flag to TRUE")
+
+        # Save the conversation to memory manager
+        try:
+            memory_manager = MemoryManager()
+            saved = memory_manager.save_conversation(state.conversation_state)
+            logger.info(f"Saved conversation to memory manager: {saved}")
+        except Exception as e:
+            logger.error(f"Failed to save conversation: {str(e)}")
+
         return {"conversation_state": state.conversation_state}
 
     # Process query state if not already done
@@ -163,13 +165,5 @@ def process_conversation_memory(state: GraphState) -> dict:
     # Store conversation update timestamp
     state.conversation_state.updated_at = datetime.now()
 
-    # Save the conversation state to the memory manager
-    try:
-        if state.conversation_state.conversation_id:
-            memory_manager = MemoryManager()
-            memory_manager.save_conversation(state.conversation_state)
-            logger.debug(f"Saved conversation state to memory manager: {state.conversation_state.conversation_id}")
-    except Exception as e:
-        logger.warning(f"Error saving conversation to memory manager: {str(e)}")
-
+    # Don't try to save here - we'll save at the end of the cycle when processing is complete
     return {"conversation_state": state.conversation_state}

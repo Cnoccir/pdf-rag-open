@@ -57,7 +57,13 @@ export interface MessageOpts {
   activeDocs?: string[];
 }
 
-// Main chat state interface
+export interface StreamProgress {
+  active: boolean;
+  stage?: string;
+  message?: string;
+  percentage: number;
+}
+
 export interface ChatState {
   error: string;
   loading: boolean;
@@ -70,9 +76,11 @@ export interface ChatState {
   availableDocuments: DocumentInfo[];
   lastMessageFailed: boolean;
   streamInProgress: boolean;
+  // Add this new field for stream progress
+  streamProgress: StreamProgress;
 }
 
-// Initial state
+// Update INITIAL_STATE to include streamProgress
 const INITIAL_STATE: ChatState = {
   error: '',
   loading: false,
@@ -84,15 +92,29 @@ const INITIAL_STATE: ChatState = {
   activeDocuments: [],
   availableDocuments: [],
   lastMessageFailed: false,
-  streamInProgress: false
+  streamInProgress: false,
+  // Initialize streamProgress
+  streamProgress: {
+    active: false,
+    stage: undefined,
+    message: undefined,
+    percentage: 0
+  }
 };
+
 
 // Create store
 const store = writable<ChatState>(INITIAL_STATE);
 
 // Helper to update state
 const set = (val: Partial<ChatState>) => {
-  store.update((state) => ({ ...state, ...val }));
+  store.update((state) => {
+    // FIX: Use direct mutations instead of object spread
+    Object.keys(val).forEach(key => {
+      state[key] = val[key];
+    });
+    // No return needed
+  });
 };
 
 // Get active conversation
@@ -122,13 +144,10 @@ const getRawMessages = () => {
 // Insert message to active conversation with improved Immer handling
 const insertMessageToActive = (message: Message) => {
   store.update((state) => {
-    // Create a fully new state object to avoid Immer's frozen state issues
-    const newState = JSON.parse(JSON.stringify(state));
-
     // Find the active conversation
-    const conv = newState.conversations.find((c) => c.id === newState.activeConversationId);
+    const conv = state.conversations.find((c) => c.id === state.activeConversationId);
     if (!conv) {
-      return newState;
+      return; // Early return, no state mutation needed
     }
 
     // Ensure messages array is initialized
@@ -144,31 +163,27 @@ const insertMessageToActive = (message: Message) => {
 
     // Add to the messages array
     conv.messages.push(messageCopy);
-
-    return newState;
+    // No return needed
   });
 };
+
 // Also update the removeMessageFromActive function
 const removeMessageFromActive = (id: string | number) => {
   store.update((state) => {
-    // Create a new state to avoid Immer issues
-    const newState = JSON.parse(JSON.stringify(state));
-
-    const conv = newState.conversations.find((c) => c.id === newState.activeConversationId);
+    const conv = state.conversations.find((c) => c.id === state.activeConversationId);
     if (!conv) {
-      return newState;
+      return; // Early return, no state mutation needed
     }
 
     // Check if messages array exists
     if (!Array.isArray(conv.messages)) {
       conv.messages = [];
-      return newState;
+      return; // Early return
     }
 
     // Filter out the message to remove
     conv.messages = conv.messages.filter((m) => m.id !== id);
-
-    return newState;
+    // No return needed
   });
 };
 
@@ -402,8 +417,22 @@ const sendMessage = async (text: string, opts: MessageOpts = {}) => {
   }
 };
 
-// Send a message with streaming
-const streamMessage = async (text: string, conversationId: string, isResearchActive: boolean, activeDocuments: string[]) => {
+// Add a function to update stream progress
+const updateStreamProgress = (progress: Partial<StreamProgress>) => {
+  store.update((state) => {
+    // FIX: Direct mutation instead of returning a new object
+    Object.assign(state.streamProgress, progress);
+    // No return needed
+  });
+};
+
+// Update streamMessage function to track progress
+const streamMessage = async (
+  text: string,
+  conversationId: string,
+  isResearchActive: boolean,
+  activeDocuments: string[]
+) => {
   // Add user message and pending message immediately for better UX
   const userMessage: Message = {
     id: Date.now(),
@@ -417,19 +446,23 @@ const streamMessage = async (text: string, conversationId: string, isResearchAct
     content: ''
   };
 
-  // Update store
-  store.update(s => {
-    const conversation = s.conversations.find(c => c.id === conversationId);
+  // Update store with new messages and initial stream progress
+  store.update((s) => {
+    const conversation = s.conversations.find((c) => c.id === conversationId);
     if (conversation) {
       if (!Array.isArray(conversation.messages)) {
         conversation.messages = [];
       }
       conversation.messages.push(userMessage, pendingMessage);
     }
-    return {
-      ...s,
-      streamInProgress: true
-    };
+
+    // Directly mutate state properties
+    s.streamInProgress = true;
+    s.streamProgress.active = true;
+    s.streamProgress.stage = 'initialization';
+    s.streamProgress.message = 'Processing your query...';
+    s.streamProgress.percentage = 5;
+    // No return statement
   });
 
   try {
@@ -437,7 +470,7 @@ const streamMessage = async (text: string, conversationId: string, isResearchAct
     const response = await fetch(`/api/conversations/${conversationId}/messages`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         input: text,
@@ -456,25 +489,25 @@ const streamMessage = async (text: string, conversationId: string, isResearchAct
     // Get reader for the stream
     const reader = response.body?.getReader();
     if (!reader) {
-      throw new Error("Stream not available");
+      throw new Error('Stream not available');
     }
 
     let accumulatedText = '';
-    let citationsData = [];
-    let decoder = new TextDecoder();
+    let citationsData: any[] = [];
+    const decoder = new TextDecoder();
 
-    // Remove pending message and replace with actual assistant message
-    store.update(s => {
-      const conversation = s.conversations.find(c => c.id === conversationId);
+    // Remove pending message and add an assistant message placeholder
+    store.update((s) => {
+      const conversation = s.conversations.find((c) => c.id === conversationId);
       if (conversation) {
-        conversation.messages = conversation.messages.filter(m => m.role !== 'pending');
+        conversation.messages = conversation.messages.filter((m) => m.role !== 'pending');
         conversation.messages.push({
           id: Date.now() + 2,
           role: 'assistant',
           content: ''
         });
       }
-      return s;
+      // No return statement
     });
 
     // Read the stream
@@ -485,15 +518,20 @@ const streamMessage = async (text: string, conversationId: string, isResearchAct
       // Decode the chunk
       const chunk = decoder.decode(value);
 
-      // Process multiple JSON objects that might be in the same chunk
-      const lines = chunk.split('\n').filter(line => line.trim());
-
+      // Process each JSON object in the chunk
+      const lines = chunk.split('\n').filter((line) => line.trim());
       for (const line of lines) {
         try {
           const data = JSON.parse(line);
 
           if (data.type === 'status' && data.status === 'processing') {
-            // Status update, do nothing yet
+            // Update stream progress
+            updateStreamProgress({
+              active: true,
+              stage: data.stage || 'processing',
+              message: data.message || 'Processing your query...',
+              percentage: data.percentage || 0
+            });
             continue;
           }
 
@@ -505,29 +543,40 @@ const streamMessage = async (text: string, conversationId: string, isResearchAct
             // Append to accumulated text
             accumulatedText += data.chunk;
 
-            // Update the message in real-time
-            store.update(s => {
-              const conversation = s.conversations.find(c => c.id === conversationId);
+            // Update the assistant message in real time
+            store.update((s) => {
+              const conversation = s.conversations.find((c) => c.id === conversationId);
               if (conversation) {
-                const assistantMsgIndex = conversation.messages.findIndex(m => m.role === 'assistant');
+                const assistantMsgIndex = conversation.messages.findIndex(
+                  (m) => m.role === 'assistant'
+                );
                 if (assistantMsgIndex >= 0) {
                   conversation.messages[assistantMsgIndex].content = accumulatedText;
                 }
               }
-              return s;
+              // No return statement
             });
+
+            // Update progress percentage if available
+            if (data.percentage) {
+              updateStreamProgress({
+                percentage: data.percentage
+              });
+            }
           }
 
           if (data.type === 'end') {
-            // Final message with complete response
+            // Finalize the response
             accumulatedText = data.message || accumulatedText;
             citationsData = data.citations || [];
 
-            // Update the final message with complete content and metadata
-            store.update(s => {
-              const conversation = s.conversations.find(c => c.id === conversationId);
+            // Update the final assistant message with content and metadata
+            store.update((s) => {
+              const conversation = s.conversations.find((c) => c.id === conversationId);
               if (conversation) {
-                const assistantMsgIndex = conversation.messages.findIndex(m => m.role === 'assistant');
+                const assistantMsgIndex = conversation.messages.findIndex(
+                  (m) => m.role === 'assistant'
+                );
                 if (assistantMsgIndex >= 0) {
                   conversation.messages[assistantMsgIndex].content = accumulatedText;
                   conversation.messages[assistantMsgIndex].metadata = {
@@ -535,12 +584,16 @@ const streamMessage = async (text: string, conversationId: string, isResearchAct
                   };
                 }
               }
-              return {
-                ...s,
-                loading: false,
-                streamInProgress: false,
-                lastMessageFailed: false
-              };
+
+              // Direct state mutations
+              s.loading = false;
+              s.streamInProgress = false;
+              s.lastMessageFailed = false;
+              s.streamProgress.active = false;
+              s.streamProgress.stage = 'complete';
+              s.streamProgress.message = 'Response complete';
+              s.streamProgress.percentage = 100;
+              // No return statement
             });
 
             // Update research mode state after receiving response
@@ -552,34 +605,47 @@ const streamMessage = async (text: string, conversationId: string, isResearchAct
             };
           }
         } catch (jsonError) {
-          console.error("Error parsing JSON from stream:", jsonError);
-          // Continue to next line
+          console.error('Error parsing JSON from stream:', jsonError);
+          // Continue with next line
         }
       }
     }
 
-    // Ensure loading is set to false even if no 'end' message
-    set({ loading: false, streamInProgress: false });
+    // If stream ends without an explicit "end" message, finalize loading state
+    store.update((s) => {
+      s.loading = false;
+      s.streamInProgress = false;
+      s.streamProgress.active = false;
+      s.streamProgress.stage = 'complete';
+      s.streamProgress.message = 'Response complete';
+      s.streamProgress.percentage = 100;
+      // No return statement
+    });
+
     return {
       content: accumulatedText,
       citations: citationsData
     };
-  } catch (error) {
-    console.error("Error in streaming message:", error);
+  } catch (error: any) {
+    console.error('Error in streaming message:', error);
 
-    // Remove pending message if still present
-    store.update(s => {
-      const conversation = s.conversations.find(c => c.id === conversationId);
+    // Remove pending message if still present and update error state
+    store.update((s) => {
+      const conversation = s.conversations.find((c) => c.id === conversationId);
       if (conversation) {
-        conversation.messages = conversation.messages.filter(m => m.role !== 'pending');
+        conversation.messages = conversation.messages.filter((m) => m.role !== 'pending');
       }
-      return {
-        ...s,
-        error: error.message || 'Failed to send message',
-        loading: false,
-        streamInProgress: false,
-        lastMessageFailed: true
-      };
+
+      // Direct state mutations
+      s.error = error.message || 'Failed to send message';
+      s.loading = false;
+      s.streamInProgress = false;
+      s.lastMessageFailed = true;
+      s.streamProgress.active = false;
+      s.streamProgress.stage = 'error';
+      s.streamProgress.message = error.message || 'Error processing request';
+      s.streamProgress.percentage = 0;
+      // No return statement
     });
 
     return null;
@@ -723,19 +789,20 @@ const activateResearchMode = async (conversationId: number, pdfIds: string[]) =>
     store.update(s => {
       const conversation = s.conversations.find(c => c.id === conversationId);
       if (conversation) {
-        conversation.metadata = {
-          ...conversation.metadata,
-          research_mode: {
-            active: true,
-            pdf_ids: [...formattedPdfIds],
-            document_names: documentsWithNames.reduce((acc, doc) => {
-              acc[doc.id] = doc.name;
-              return acc;
-            }, {})
-          }
+        if (!conversation.metadata) {
+          conversation.metadata = {};
+        }
+
+        conversation.metadata.research_mode = {
+          active: true,
+          pdf_ids: [...formattedPdfIds],
+          document_names: documentsWithNames.reduce((acc, doc) => {
+            acc[doc.id] = doc.name;
+            return acc;
+          }, {})
         };
       }
-      return s;
+      // No return statement
     });
 
     return true;
@@ -772,17 +839,19 @@ const deactivateResearchMode = async (conversationId: number) => {
     store.update(s => {
       const conversation = s.conversations.find(c => c.id === conversationId);
       if (conversation) {
-        // Create a new metadata object to ensure state updates properly
-        conversation.metadata = {
-          ...conversation.metadata,
-          research_mode: {
-            active: false,
-            pdf_ids: [],
-            document_names: {}
-          }
+        // Ensure metadata exists
+        if (!conversation.metadata) {
+          conversation.metadata = {};
+        }
+
+        // Update research_mode property
+        conversation.metadata.research_mode = {
+          active: false,
+          pdf_ids: [],
+          document_names: {}
         };
       }
-      return s;
+      // No return statement
     });
 
     return true;
@@ -812,11 +881,11 @@ const acceptRecommendedDocument = async (documentId: string) => {
   const allDocIds = [...new Set([...currentDocIds, documentId])];
 
   // Update locally first for better UX
-  store.update(s => ({
-    ...s,
-    recommendedDocuments: s.recommendedDocuments.filter(d => d.id !== documentId),
-    loading: true
-  }));
+  store.update(s => {
+    s.recommendedDocuments = s.recommendedDocuments.filter(d => d.id !== documentId);
+    s.loading = true;
+    // No return statement
+  });
 
   logDebug(`Accepting recommended document ${documentId}, activating research mode with docs:`, allDocIds);
 
@@ -860,10 +929,10 @@ const deleteDocument = async (documentId: string) => {
     logDebug(`Document ${documentId} deleted successfully`);
 
     // Update available documents list
-    store.update(s => ({
-      ...s,
-      availableDocuments: s.availableDocuments.filter(doc => doc.id !== documentId)
-    }));
+    store.update(s => {
+      s.availableDocuments = s.availableDocuments.filter(doc => doc.id !== documentId);
+      // No return statement
+    });
 
     return true;
   } catch (error) {
@@ -986,5 +1055,7 @@ export {
   fetchAvailableDocuments,
   updateResearchModeFromActiveConversation,
   deleteDocument,
+  updateStreamProgress,
+  StreamProgress,
   streamMessage
 };
