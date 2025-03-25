@@ -9,6 +9,9 @@ import json
 from datetime import datetime
 import traceback
 from typing import Dict, Any, Optional, List
+# Add missing imports
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from langgraph.errors import GraphRecursionError
 
 from app.chat.types import ResearchMode
 from app.chat.models import ChatArgs
@@ -193,14 +196,59 @@ def create_message(conversation_id):
             research_mode_str = "research" if use_research else "single"
             pdf_ids = active_docs if use_research and active_docs else [str(conversation.pdf_id)] if conversation.pdf_id else None
 
-            result = process_query(
-                query=user_message,
-                conversation_id=conversation_id,
-                pdf_id=str(conversation.pdf_id) if conversation.pdf_id else None,
-                research_mode=research_mode_str,
-                stream=False,
-                pdf_ids=pdf_ids
-            )
+            try:
+                result = process_query(
+                    query=user_message,
+                    conversation_id=conversation_id,
+                    pdf_id=str(conversation.pdf_id) if conversation.pdf_id else None,
+                    research_mode=research_mode_str,
+                    stream=False,
+                    pdf_ids=pdf_ids
+                )
+            except GraphRecursionError as recursion_error:
+                # Handle recursion error with a helpful message
+                logger.warning(f"GraphRecursionError: {str(recursion_error)}")
+
+                # Create a fallback response
+                fallback_response = "I'm having trouble processing your request due to its complexity. Could you please rephrase your question in a more specific way?"
+
+                # Add the fallback response to the database
+                assistant_db_message = Message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=fallback_response
+                )
+                db.session.add(assistant_db_message)
+                db.session.commit()
+
+                # Return a friendly error message
+                return jsonify({
+                    "response": fallback_response,
+                    "conversation_id": conversation_id,
+                    "warning": "Query was too complex to process"
+                })
+            except Exception as query_error:
+                # Handle other errors
+                error_msg = str(query_error)
+                logger.error(f"Error in processing query: {error_msg}")
+
+                # Create a fallback response
+                fallback_response = "I encountered an error while processing your request. Please try again with a different question."
+
+                # Add the fallback response to the database
+                assistant_db_message = Message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=fallback_response
+                )
+                db.session.add(assistant_db_message)
+                db.session.commit()
+
+                return jsonify({
+                    "error": error_msg,
+                    "response": fallback_response,
+                    "conversation_id": conversation_id
+                }), 500
 
             if "error" in result:
                 logger.error(f"Error in message processing: {result['error']}")
@@ -385,7 +433,7 @@ def delete_conversation(conversation_id):
         return jsonify({"error": str(e)}), 500
 
 def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_id=None, active_docs=None):
-    """Stream chat response for a message with enhanced progress tracking."""
+    """Stream chat response for a message with enhanced progress tracking and error handling."""
     def generate():
         # Initialize chat manager
         chat_args = ChatArgs(
@@ -413,55 +461,77 @@ def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_i
             # Stream response
             pdf_ids_to_use = active_docs if research_mode_str == "research" and active_docs else None
             response_chunks = []
+            final_response = None
 
             # Track progress for frontend
             last_percentage = 5
 
-            # Use the streamable ChatManager.stream_query method
-            for chunk in chat_manager.stream_query(user_message, pdf_ids_to_use):
-                if "error" in chunk:
-                    yield json.dumps({
-                        "type": "error",
-                        "error": chunk["error"]
-                    }) + "\n"
-                    return
-
-                if "status" in chunk:
-                    # Update progress information
-                    current_percentage = chunk.get("percentage", last_percentage)
-                    last_percentage = current_percentage
-
-                    if chunk["status"] == "processing":
+            # Use the streamable ChatManager.stream_query method with improved error handling
+            try:
+                for chunk in chat_manager.stream_query(user_message, pdf_ids_to_use):
+                    if "error" in chunk:
                         yield json.dumps({
-                            "type": "status",
-                            "status": "processing",
-                            "stage": chunk.get("stage", "processing"),
-                            "message": chunk["message"],
-                            "percentage": current_percentage
-                        }) + "\n"
-                    elif chunk["status"] == "complete":
-                        # The conversation is already saved by the ChatManager
-                        yield json.dumps({
-                            "type": "end",
-                            "message": chunk["response"],
-                            "conversation_id": conversation_id,
-                            "citations": chunk.get("citations", []),
-                            "percentage": 100
+                            "type": "error",
+                            "error": chunk["error"],
+                            "response": chunk.get("response", "I encountered an error processing your request.")
                         }) + "\n"
                         return
 
-                if "type" in chunk and chunk["type"] == "stream":
-                    # Add to accumulated response for database
-                    response_chunks.append(chunk["chunk"])
+                    if "status" in chunk:
+                        # Update progress information
+                        current_percentage = chunk.get("percentage", last_percentage)
+                        last_percentage = current_percentage
 
-                    # Yield chunk to client with percentage if available
-                    yield json.dumps({
-                        "type": "stream",
-                        "chunk": chunk["chunk"],
-                        "index": chunk.get("index", 0),
-                        "percentage": chunk.get("percentage", last_percentage),
-                        "is_complete": chunk.get("is_complete", False)
-                    }) + "\n"
+                        if chunk["status"] == "processing":
+                            yield json.dumps({
+                                "type": "status",
+                                "status": "processing",
+                                "stage": chunk.get("stage", "processing"),
+                                "message": chunk["message"],
+                                "percentage": current_percentage
+                            }) + "\n"
+                        elif chunk["status"] == "complete":
+                            # The conversation is already saved by the ChatManager
+                            yield json.dumps({
+                                "type": "end",
+                                "message": chunk["response"],
+                                "conversation_id": conversation_id,
+                                "citations": chunk.get("citations", []),
+                                "percentage": 100
+                            }) + "\n"
+                            return
+
+                    if "type" in chunk and chunk["type"] == "stream":
+                        # Add to accumulated response for database
+                        response_chunks.append(chunk["chunk"])
+
+                        # Yield chunk to client with percentage if available
+                        yield json.dumps({
+                            "type": "stream",
+                            "chunk": chunk["chunk"],
+                            "index": chunk.get("index", 0),
+                            "percentage": chunk.get("percentage", last_percentage),
+                            "is_complete": chunk.get("is_complete", False)
+                        }) + "\n"
+            except GraphRecursionError as recursion_error:
+                logger.warning(f"GraphRecursionError in streaming: {str(recursion_error)}")
+                fallback_response = "I'm having trouble processing your request due to its complexity. Could you please rephrase your question in a more specific way?"
+
+                # Save fallback response to database
+                assistant_message = Message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=fallback_response
+                )
+                db.session.add(assistant_message)
+                db.session.commit()
+
+                yield json.dumps({
+                    "type": "error",
+                    "error": "Query complexity limit reached",
+                    "response": fallback_response
+                }) + "\n"
+                return
 
             # If we reached here without a complete message
             # save the response to the database as a fallback
@@ -499,12 +569,34 @@ def stream_chat_response(conversation_id, user_message, research_mode_str, pdf_i
 
             except Exception as db_error:
                 logger.error(f"Error saving streamed response: {str(db_error)}")
+                yield json.dumps({
+                    "type": "error",
+                    "error": "Failed to save response",
+                    "response": "I encountered an error while saving our conversation. Your message was received but there was a problem with my response."
+                }) + "\n"
 
         except Exception as e:
             logger.error(f"Error in streaming: {str(e)}", exc_info=True)
+
+            # Create a user-friendly error message
+            error_response = "I encountered an error while processing your query. Please try again later."
+
+            # Try to save the error response to the database
+            try:
+                assistant_message = Message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=error_response
+                )
+                db.session.add(assistant_message)
+                db.session.commit()
+            except Exception as db_error:
+                logger.error(f"Error saving error response: {str(db_error)}")
+
             yield json.dumps({
                 "type": "error",
-                "error": str(e)
+                "error": str(e),
+                "response": error_response
             }) + "\n"
 
     # Return streaming response

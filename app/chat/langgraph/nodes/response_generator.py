@@ -247,8 +247,13 @@ def generate_response(state: GraphState) -> dict:
 
         # CRITICAL FIX: Mark response as processed to signal completion
         if state.conversation_state and state.conversation_state.metadata:
+            # CRITICAL: Always mark any response as processed
             state.conversation_state.metadata["processed_response"] = True
             state.conversation_state.metadata["completed_at"] = datetime.now().isoformat()
+
+            # For fallback responses with no retrieval results, add special metadata
+            if not has_elements:
+                state.conversation_state.metadata["fallback_response"] = True
 
         logger.info(
             f"Response generation complete with {len(citations)} citations, "

@@ -10,6 +10,7 @@ import uuid
 from pydantic import BaseModel, Field
 
 from app.chat.types import ChunkLevel, EmbeddingType, ContentType
+from langgraph.managed.is_last_step import RemainingSteps
 
 # -----------------------
 # Type Definitions
@@ -154,6 +155,7 @@ class GraphState(BaseModel):
 
     # Optional document processing state
     document_state: Optional[Dict[str, Any]] = None
+    remaining_steps: Optional[int] = None
 
     class Config:
         """Pydantic config"""

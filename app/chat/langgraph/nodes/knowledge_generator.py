@@ -1,6 +1,7 @@
 """
 Knowledge generator node for LangGraph-based PDF RAG system.
 Synthesizes retrieved content into coherent knowledge structures.
+Improved to handle empty retrieval results gracefully.
 """
 
 import logging
@@ -43,7 +44,7 @@ Format your response as a JSON object with these keys:
 def generate_knowledge(state: GraphState) -> dict:
     """
     Generate synthesized knowledge from retrieved content.
-    Simplified implementation without async/await.
+    Improved to handle empty retrieval results.
 
     Args:
         state: Current graph state
@@ -58,9 +59,35 @@ def generate_knowledge(state: GraphState) -> dict:
         return {"research_state": state.research_state}
 
     # Check if we have retrieval elements
-    if not state.retrieval_state.elements:
+    no_elements = not state.retrieval_state.elements
+    empty_result = (state.retrieval_state.metadata and
+                   (state.retrieval_state.metadata.get("empty_result", False) or
+                    state.retrieval_state.metadata.get("warning") == "No relevant content found for this query"))
+
+    if no_elements or empty_result:
         logger.warning("No elements retrieved, skipping knowledge generation")
-        state.research_state = ResearchState(query_state=state.query_state)
+
+        # Create minimal research state with a flag indicating no content was found
+        state.research_state = ResearchState(
+            query_state=state.query_state,
+            insights=["No relevant information was found in the document to answer this query."],
+            metadata={
+                "no_content_found": True,
+                "query": state.query_state.query,
+                "timestamp": datetime.now().isoformat(),
+                "pdf_ids": state.query_state.pdf_ids if state.query_state.pdf_ids else []
+            }
+        )
+
+        # Create a minimal research context to maintain compatibility
+        from app.chat.models import ResearchContext
+        research_context = ResearchContext(
+            primary_pdf_id=state.query_state.pdf_ids[0] if state.query_state.pdf_ids else None
+        )
+
+        # Set the research context
+        state.research_state.research_context = research_context
+
         return {"research_state": state.research_state}
 
     query = state.query_state.query
@@ -83,27 +110,37 @@ def generate_knowledge(state: GraphState) -> dict:
             content=content_str
         )
 
-        # Call the OpenAI API
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Using GPT-4 for better synthesis
-            messages=[
-                {"role": "system", "content": "You are an expert knowledge synthesizer for technical documentation."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"}
-        )
-
-        # Parse the response
+        # Call the OpenAI API with error handling
         try:
-            synthesis = json.loads(response.choices[0].message.content)
-        except json.JSONDecodeError:
-            logger.warning("Failed to parse JSON from OpenAI response, using raw text")
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",  # Using GPT-4 for better synthesis
+                messages=[
+                    {"role": "system", "content": "You are an expert knowledge synthesizer for technical documentation."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"}
+            )
+
+            # Parse the response
+            try:
+                synthesis = json.loads(response.choices[0].message.content)
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse JSON from OpenAI response, using raw text")
+                synthesis = {
+                    "summary": response.choices[0].message.content[:500],
+                    "facts": ["Unable to parse structured response"],
+                    "insights": [],
+                    "gaps": ["Information structure could not be parsed"],
+                    "cross_references": []
+                }
+        except Exception as api_error:
+            logger.error(f"OpenAI API error: {str(api_error)}")
             synthesis = {
-                "summary": response.choices[0].message.content[:500],
-                "facts": ["Unable to parse structured response"],
-                "insights": [],
-                "gaps": ["Information structure could not be parsed"],
+                "summary": "Error generating knowledge synthesis.",
+                "facts": ["Technical error occurred during synthesis"],
+                "insights": ["The system encountered a problem while analyzing the content."],
+                "gaps": ["Complete analysis could not be performed due to a technical issue."],
                 "cross_references": []
             }
 
@@ -115,7 +152,7 @@ def generate_knowledge(state: GraphState) -> dict:
             elif isinstance(ref, dict):
                 formatted_cross_references.append(ref)
 
-        # Store information in research state - don't create ResearchContext with attributes it doesn't have
+        # Store information in research state
         state.research_state = ResearchState(
             query_state=state.query_state,
             cross_references=formatted_cross_references,
@@ -123,7 +160,7 @@ def generate_knowledge(state: GraphState) -> dict:
             metadata={
                 "synthesis": synthesis,
                 "summary": synthesis.get("summary", ""),
-                "facts": synthesis.get("facts", []),  # Store in metadata instead of ResearchContext
+                "facts": synthesis.get("facts", []),
                 "gaps": synthesis.get("gaps", []),
                 "model": "gpt-4o-mini",
                 "element_count": len(state.retrieval_state.elements),
@@ -131,19 +168,30 @@ def generate_knowledge(state: GraphState) -> dict:
             }
         )
 
-        # Create an appropriate research context that matches its actual definition
-        from app.chat.models import ResearchContext
-        research_context = ResearchContext(primary_pdf_id=state.query_state.pdf_ids[0] if state.query_state.pdf_ids else None)
+        # Create a research context for compatibility
+        try:
+            from app.chat.models import ResearchContext
+            research_context = ResearchContext(
+                primary_pdf_id=state.query_state.pdf_ids[0] if state.query_state.pdf_ids else None
+            )
 
-        # Add active PDF IDs
-        if state.query_state.pdf_ids:
-            for pdf_id in state.query_state.pdf_ids:
-                research_context.add_document(pdf_id)
+            # Add active PDF IDs
+            if state.query_state.pdf_ids:
+                for pdf_id in state.query_state.pdf_ids:
+                    research_context.add_document(pdf_id)
 
-        # Set the research context properly
-        state.research_state.research_context = research_context
+            # Set the research context
+            state.research_state.research_context = research_context
+        except Exception as context_error:
+            logger.error(f"Error creating research context: {str(context_error)}")
+            # Create a minimal research context as fallback
+            from app.chat.models import ResearchContext
+            research_context = ResearchContext(
+                primary_pdf_id=state.query_state.pdf_ids[0] if state.query_state.pdf_ids else None
+            )
+            state.research_state.research_context = research_context
 
-        # Access facts from metadata, not from research_context
+        # Log results
         facts_count = len(synthesis.get("facts", []))
         insights_count = len(synthesis.get("insights", []))
 
@@ -158,10 +206,17 @@ def generate_knowledge(state: GraphState) -> dict:
         logger.error(f"Knowledge generation failed: {str(e)}", exc_info=True)
 
         # Initialize basic research state in case of error
+        from app.chat.models import ResearchContext
         state.research_state = ResearchState(
             query_state=state.query_state,
             metadata={"error": str(e)},
             cross_references=[]  # Ensure this is a valid empty list
         )
+
+        # Create a minimal research context as fallback
+        research_context = ResearchContext(
+            primary_pdf_id=state.query_state.pdf_ids[0] if state.query_state.pdf_ids else None
+        )
+        state.research_state.research_context = research_context
 
         return {"research_state": state.research_state}
